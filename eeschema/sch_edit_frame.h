@@ -24,6 +24,9 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
  */
 
+// Modified by Chirichella Inc. on 2026-10-15: SCH_EDIT_FRAME gains a public
+// ImportSchematicFile door to the private importFile, for the WebAssembly bindings.
+
 #ifndef  SCH_EDIT_FRAME_H
 #define  SCH_EDIT_FRAME_H
 
@@ -135,6 +138,14 @@ class SCH_EDIT_FRAME : public SCH_BASE_FRAME
 public:
     SCH_EDIT_FRAME( KIWAY* aKiway, wxWindow* aParent );
     ~SCH_EDIT_FRAME() override;
+
+    // Modified by Chirichella Inc. on 2026-10-15: a public door to importFile for the
+    // WebAssembly bindings (the browser has no File > Import dialog to drive).
+    bool ImportSchematicFile( const wxString& aFileName, int aFileType,
+                              const std::map<std::string, UTF8>* aProperties = nullptr )
+    {
+        return importFile( aFileName, aFileType, aProperties );
+    }
 
     SCH_SCREEN* GetScreen() const override;
 

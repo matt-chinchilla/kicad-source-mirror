@@ -1,3 +1,6 @@
+# Modified by Chirichella Inc. on 2026-10-15: the five Altium parser sources (io/altium/*.cpp)
+# build under Emscripten too; the NOT EMSCRIPTEN gate around them is removed.
+
 # Add all the warnings to the files
 if( COMPILER_SUPPORTS_WARNINGS )
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${WARN_FLAGS_CXX}")
@@ -723,6 +726,13 @@ set( PLOTTERS_CONTROL_SRCS
 
 set( COMMON_IO_SRCS
 
+    # Altium
+    io/altium/altium_binary_parser.cpp
+    io/altium/altium_ascii_parser.cpp
+    io/altium/altium_parser_utils.cpp
+    io/altium/altium_project_variants.cpp
+    io/altium/altium_props_utils.cpp
+
     # Cadstar
     io/cadstar/cadstar_archive_parser.cpp
     io/cadstar/cadstar_parts_lib_parser.cpp
@@ -740,17 +750,6 @@ set( COMMON_IO_SRCS
 
     io/csv.cpp
     )
-
-# Altium import not supported on WASM (compoundfilereader uses non-standard std::basic_string<unsigned short>)
-if( NOT EMSCRIPTEN )
-    list( APPEND COMMON_IO_SRCS
-        io/altium/altium_binary_parser.cpp
-        io/altium/altium_ascii_parser.cpp
-        io/altium/altium_parser_utils.cpp
-        io/altium/altium_project_variants.cpp
-        io/altium/altium_props_utils.cpp
-    )
-endif()
 
 set ( COMMON_TRANSLINE_CALCULATION_SRCS
     transline_calculations/transline_calculation_base.cpp

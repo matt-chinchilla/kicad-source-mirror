@@ -1,3 +1,7 @@
+# Modified by Chirichella Inc. on 2026-10-15: every schematic importer but Database
+# (Altium, Eagle, CADSTAR, LTspice, EasyEDA, EasyEDA Pro, PADS, gEDA) builds under
+# Emscripten; the WASM REMOVE_ITEM list keeps only sch_io_database.cpp.
+
 # Add all the warnings to the files
 if( COMPILER_SUPPORTS_WARNINGS )
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${WARN_FLAGS_CXX}")
@@ -102,36 +106,13 @@ set( EESCHEMA_SCH_IO
     sch_io/pcbjam_lib/sch_io_pcbjam_lib.cpp
     )
 
-# Third-party importers and the database plugin are not built for WASM (sch_io_mgr.cpp's
-# factory cases are guarded with __EMSCRIPTEN__ to match):
-# - Database needs nanodbc/ODBC (also gated NOT EMSCRIPTEN in common/CMakeLists.txt).
-# - Altium pulls in pcbnew/pcb_io/altium common code that uses
-#   std::basic_string<unsigned short>, which the current Emscripten libc++ rejects.
-# - Eagle/Cadstar/LTspice/EasyEDA are cross-tool importers not needed for the MVP and
-#   they bring transitive incompatible dependencies in.
+# The database plugin is not built for WASM (ODBC has no browser path); sch_io_mgr.cpp's
+# factory case is guarded to match. Every other importer builds: the
+# std::char_traits<unsigned short> specialization the Altium parser needs is force-included
+# into every TU by the build script.
 if( EMSCRIPTEN )
     list( REMOVE_ITEM EESCHEMA_SCH_IO
         sch_io/database/sch_io_database.cpp
-        sch_io/geda/sch_io_geda.cpp
-        sch_io/eagle/sch_io_eagle.cpp
-        sch_io/altium/altium_parser_sch.cpp
-        sch_io/altium/sch_io_altium.cpp
-        sch_io/cadstar/cadstar_sch_archive_loader.cpp
-        sch_io/cadstar/cadstar_sch_archive_parser.cpp
-        sch_io/cadstar/sch_io_cadstar_archive.cpp
-        sch_io/ltspice/ltspice_schematic.cpp
-        sch_io/ltspice/sch_io_ltspice.cpp
-        sch_io/ltspice/sch_io_ltspice_parser.cpp
-        sch_io/easyeda/sch_easyeda_parser.cpp
-        sch_io/easyeda/sch_io_easyeda.cpp
-        sch_io/easyedapro/sch_easyedapro_parser.cpp
-        sch_io/easyedapro/sch_io_easyedapro.cpp
-
-        # PADS Logic IO plugin
-        sch_io/pads/sch_io_pads.cpp
-        sch_io/pads/pads_sch_parser.cpp
-        sch_io/pads/pads_sch_symbol_builder.cpp
-        sch_io/pads/pads_sch_schematic_builder.cpp
     )
 endif()
 
