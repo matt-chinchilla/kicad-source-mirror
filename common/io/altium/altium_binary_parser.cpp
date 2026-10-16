@@ -20,6 +20,10 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+  *
+ * Modified by Chirichella Inc. on 2026-10-15: ReadProperties no longer inserts an
+ * empty RECORD while a record is being read (the "Header already parsed" failure
+ * on sheets whose pin records put DESIGNATOR before RECORD); KiCad master d07e9384.
  */
 
 #include "altium_binary_parser.h"
@@ -445,15 +449,30 @@ std::map<wxString, wxString> ALTIUM_BINARY_PARSER::ReadProperties(
             value.Replace( wxT( "ÿ" ), wxT( " " ) );
         }
 
-        if( canonicalKey == wxT( "DESIGNATOR" )
-                || canonicalKey == wxT( "NAME" )
-                || canonicalKey == wxT( "TEXT" ) )
-        {
-            if( kv[ wxT( "RECORD" ) ] != wxT( "4" ) )
-                value = AltiumPropertyToKiCadString( value.Trim() );
-        }
-
         kv.insert( { canonicalKey, value.Trim() } );
+    }
+
+    // Modified by Chirichella Inc. on 2026-10-15: the DESIGNATOR, NAME and TEXT
+    // conversion runs after the whole record is read and looks RECORD up with
+    // find(), never operator[]. The old in-loop kv[ "RECORD" ] INSERTED an empty
+    // RECORD whenever a key preceded it (pin records written
+    // "|DESIGNATOR=4|RECORD=2|..." do that), the later insert of the real value
+    // never overwrote it, ReadInt read 0 = HEADER, and the sheet failed with
+    // "Header already parsed". Same repair as KiCad master d07e9384 (2026-07-16).
+    auto recordIt = kv.find( wxT( "RECORD" ) );
+
+    if( recordIt == kv.end() || recordIt->second != wxT( "4" ) )
+    {
+        for( const wxChar* key : { wxT( "DESIGNATOR" ), wxT( "NAME" ), wxT( "TEXT" ) } )
+        {
+            auto it = kv.find( key );
+
+            if( it != kv.end() )
+            {
+                wxString converted = AltiumPropertyToKiCadString( it->second );
+                it->second = converted.Trim();
+            }
+        }
     }
 
     return kv;
