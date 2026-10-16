@@ -21,6 +21,11 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Chirichella Inc. on 2026-10-16: KIID( const std::string& ) assigns its
+ * random fallback after the catch handler instead of inside it (the WebAssembly build
+ * compiled the in-handler thread_local access to a trap; every Altium board import
+ * died on it).
  */
 
 #include <kiid.h>
@@ -133,14 +138,27 @@ KIID::KIID( const std::string& aString ) :
     }
     else
     {
+        // Modified by Chirichella Inc. on 2026-10-16: the random fallback runs after the
+        // handler, never inside it. Clang calls a thread_local's wrapper (randomGenerator's)
+        // with no "funclet" operand bundle, and LLVM's WinEHPrepare, which WebAssembly
+        // exception handling uses, replaces such a call inside a catch funclet with
+        // unreachable: in the WebAssembly build every string that is not a UUID (Altium's
+        // empty or 8 letter ids among them) trapped here instead of getting a random id.
+        bool parsed = false;
+
         try
         {
             m_uuid = stringGenerator( aString );
+            parsed = true;
         }
         catch( ... )
         {
             // Failed to parse string representation; best we can do is assign a new
-            // random one.
+            // random one, below.
+        }
+
+        if( !parsed )
+        {
 #if BOOST_VERSION >= 106700
             try
             {
