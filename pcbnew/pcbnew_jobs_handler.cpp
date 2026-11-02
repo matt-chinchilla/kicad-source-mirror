@@ -1442,6 +1442,10 @@ int PCBNEW_JOBS_HANDLER::JobExportGerbers( JOB* aJob )
 
             PlotBoardLayers( brd, plotter, plotSequence, plotOpts );
             plotter->EndPlot();
+
+            // StartPlotBoard gives every plotter its own PCB_RENDER_SETTINGS; the plotter
+            // does not own it (PCB_PLOTTER::Plot deletes both), so each layer leaked one.
+            delete plotter->RenderSettings();
         }
         else
         {
