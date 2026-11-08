@@ -50,6 +50,11 @@ public:
     int RepeatDrawItem( const TOOL_EVENT& aEvent );
 
     int Properties( const TOOL_EVENT& aEvent );
+
+#ifdef __EMSCRIPTEN__
+    ///< Whether the in-browser editor's host takes this symbol's properties (no KiCad dialog).
+    bool askHostForProperties( EDA_ITEM* aSymbol, const wxString& aFieldName );
+#endif
     int EditField( const TOOL_EVENT& aEvent );
     int AutoplaceFields( const TOOL_EVENT& aEvent );
     int ChangeSymbols( const TOOL_EVENT& aEvent );

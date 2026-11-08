@@ -76,6 +76,11 @@
 #include <project/net_settings.h>
 #include <tools/sch_tool_utils.h>
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#include <json_common.h>
+#endif
+
 
 class SYMBOL_UNIT_MENU : public ACTION_MENU
 {
@@ -2539,6 +2544,36 @@ int SCH_EDIT_TOOL::CycleBodyStyle( const TOOL_EVENT& aEvent )
 }
 
 
+#ifdef __EMSCRIPTEN__
+// Asks the in-browser editor's host whether it edits this symbol in its own window:
+// window.kicadProperties.onRequest(json) answering truthy takes the request. No
+// listener, a falsy answer or a throwing listener leaves it to KiCad's dialog.
+bool SCH_EDIT_TOOL::askHostForProperties( EDA_ITEM* aSymbol, const wxString& aFieldName )
+{
+    nlohmann::json req;
+    req["type"] = "symbol";
+    req["uuid"] = aSymbol->m_Uuid.AsString().ToStdString( wxConvUTF8 );
+    req["sheetPath"] = m_frame->GetCurrentSheet().PathAsString().ToStdString( wxConvUTF8 );
+
+    if( !aFieldName.IsEmpty() )
+        req["field"] = aFieldName.ToStdString( wxConvUTF8 );
+
+    const std::string text = req.dump( -1, ' ', false, nlohmann::json::error_handler_t::replace );
+
+    int taken = EM_ASM_INT( {
+        if( !window.kicadProperties || typeof window.kicadProperties.onRequest !== 'function' )
+            return 0;
+
+        // A throwing listener must never unwind the wasm frame that called it.
+        try { return window.kicadProperties.onRequest( UTF8ToString( $0 ) ) ? 1 : 0; }
+        catch( e ) { console.error( '[cc properties] onRequest listener threw', e ); return 0; }
+    }, text.c_str() );
+
+    return taken != 0;
+}
+#endif
+
+
 int SCH_EDIT_TOOL::Properties( const TOOL_EVENT& aEvent )
 {
     SCH_SELECTION& selection = m_selectionTool->RequestSelection();
@@ -2568,6 +2603,37 @@ int SCH_EDIT_TOOL::Properties( const TOOL_EVENT& aEvent )
         if( parent->Type() == SCH_SYMBOL_T )
             curr_item = parent;
     }
+
+#ifdef __EMSCRIPTEN__
+    // The in-browser editor's host draws its own properties window for a symbol
+    // (window.kicadProperties.onRequest); KiCad's dialog opens only when no host
+    // takes the request. A lone field of a symbol counts as that symbol here.
+    {
+        EDA_ITEM* asked = curr_item;
+        wxString  fieldName;
+
+        if( selection.GetSize() == 1 && asked->Type() == SCH_FIELD_T && asked->GetParent()
+                && asked->GetParent()->Type() == SCH_SYMBOL_T )
+        {
+            fieldName = static_cast<SCH_FIELD*>( asked )->GetName();
+            asked = asked->GetParent();
+        }
+
+        if( asked->Type() == SCH_SYMBOL_T && askHostForProperties( asked, fieldName ) )
+        {
+            // The host's window edits this symbol: it stays the one selected (a pin or
+            // a field gives way to its symbol), so the engine's selection event names it.
+            if( asked != selection.Front() || selection.GetSize() != 1 )
+            {
+                m_selectionTool->ClearSelection( true );
+                m_selectionTool->AddItemToSel( asked );
+            }
+
+            selection.SetIsHover( false );
+            return 0;
+        }
+    }
+#endif
 
     switch( curr_item->Type() )
     {
