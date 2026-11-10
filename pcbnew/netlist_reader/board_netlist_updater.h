@@ -38,6 +38,30 @@ class PCB_EDIT_FRAME;
 class PCB_GROUP;
 
 #include <board_commit.h>
+#include <widgets/report_severity.h>
+
+/**
+ * One change or problem the updater reported, as a record (the in-browser editor's
+ * Update the board panel reads these instead of KiCad's sentences). Severity is
+ * "change", "warning" or "error"; message is KiCad's own sentence, for logs only.
+ * Which fields a kind fills is the panel's record table: "copper" carries its item
+ * ("via" or "zone") in topic.
+ */
+struct NETLIST_CHANGE
+{
+    wxString kind;
+    wxString severity;
+    wxString ref;
+    wxString footprint;
+    wxString from;
+    wxString to;
+    wxString pin;
+    wxString net;
+    wxString name;
+    wxString topic;
+    wxString code;
+    wxString message;
+};
 
 /**
  * Update the #BOARD with a new netlist.
@@ -104,7 +128,15 @@ public:
 
     std::vector<PCB_GROUP*> GetAddedGroups() const { return m_addedGroups; }
 
+#ifdef __EMSCRIPTEN__
+    /// Every change, warning and error report also appends its record here (null: none).
+    void SetChangeLog( std::vector<NETLIST_CHANGE>* aLog ) { m_changeLog = aLog; }
+#endif
+
 private:
+    /// Reports the sentence and, with a change log set, appends its record.
+    void reportChange( const wxString& aMessage, SEVERITY aSeverity, NETLIST_CHANGE aChange );
+
     void cacheNetname( PAD* aPad, const wxString& aNetname );
     wxString getNetname( PAD* aPad );
 
@@ -169,6 +201,10 @@ private:
     int m_errorCount;
     int m_newFootprintsCount;   // the count of new footprints
                                 // either really new or replaced by new fp.
+
+#ifdef __EMSCRIPTEN__
+    std::vector<NETLIST_CHANGE>* m_changeLog = nullptr;
+#endif
 };
 
 #endif

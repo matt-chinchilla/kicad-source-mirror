@@ -140,6 +140,24 @@ VECTOR2I BOARD_NETLIST_UPDATER::estimateFootprintInsertionPosition()
 }
 
 
+void BOARD_NETLIST_UPDATER::reportChange( const wxString& aMessage, SEVERITY aSeverity,
+                                          NETLIST_CHANGE aChange )
+{
+    m_reporter->Report( aMessage, aSeverity );
+
+#ifdef __EMSCRIPTEN__
+    if( m_changeLog )
+    {
+        aChange.severity = aSeverity == RPT_SEVERITY_ERROR     ? wxS( "error" )
+                         : aSeverity == RPT_SEVERITY_WARNING   ? wxS( "warning" )
+                                                               : wxS( "change" );
+        aChange.message = aMessage;
+        m_changeLog->push_back( std::move( aChange ) );
+    }
+#endif
+}
+
+
 FOOTPRINT* BOARD_NETLIST_UPDATER::addNewFootprint( COMPONENT* aComponent )
 {
     return addNewFootprint( aComponent, aComponent->GetFPID() );
@@ -154,7 +172,8 @@ FOOTPRINT* BOARD_NETLIST_UPDATER::addNewFootprint( COMPONENT* aComponent, const 
     {
         msg.Printf( _( "Cannot add %s (no footprint assigned)." ),
                     aComponent->GetReference() );
-        m_reporter->Report( msg, RPT_SEVERITY_ERROR );
+        reportChange( msg, RPT_SEVERITY_ERROR,
+                      { .kind = wxS( "problem" ), .ref = aComponent->GetReference(), .code = wxS( "no_footprint" ) } );
         ++m_errorCount;
         return nullptr;
     }
@@ -166,7 +185,8 @@ FOOTPRINT* BOARD_NETLIST_UPDATER::addNewFootprint( COMPONENT* aComponent, const 
         msg.Printf( _( "Cannot add %s (footprint '%s' not found)." ),
                     aComponent->GetReference(),
                     EscapeHTML( aFootprintId.Format().wx_str() ) );
-        m_reporter->Report( msg, RPT_SEVERITY_ERROR );
+        reportChange( msg, RPT_SEVERITY_ERROR,
+                      { .kind = wxS( "problem" ), .ref = aComponent->GetReference(), .footprint = wxString( aFootprintId.Format().wx_str() ), .code = wxS( "footprint_not_found" ) } );
         ++m_errorCount;
         return nullptr;
     }
@@ -211,7 +231,8 @@ FOOTPRINT* BOARD_NETLIST_UPDATER::addNewFootprint( COMPONENT* aComponent, const 
                     EscapeHTML( aFootprintId.Format().wx_str() ) );
     }
 
-    m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+    reportChange( msg, RPT_SEVERITY_ACTION,
+                  { .kind = wxS( "add" ), .ref = aComponent->GetReference(), .footprint = wxString( aFootprintId.Format().wx_str() ) } );
     m_newFootprintsCount++;
     return footprint;
 }
@@ -301,7 +322,8 @@ bool BOARD_NETLIST_UPDATER::updateComponentClass( FOOTPRINT* aFootprint, COMPONE
         }
     }
 
-    m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+    reportChange( msg, RPT_SEVERITY_ACTION,
+                  { .kind = wxS( "detail" ), .ref = aFootprint->GetReference(), .from = curClassName, .to = newClassName, .topic = wxS( "class" ) } );
 
     if( copy )
         m_commit.Modified( aFootprint, copy );
@@ -319,7 +341,8 @@ FOOTPRINT* BOARD_NETLIST_UPDATER::replaceFootprint( NETLIST& aNetlist, FOOTPRINT
     {
         msg.Printf( _( "Cannot update %s (no footprint assigned)." ),
                     aNewComponent->GetReference() );
-        m_reporter->Report( msg, RPT_SEVERITY_ERROR );
+        reportChange( msg, RPT_SEVERITY_ERROR,
+                      { .kind = wxS( "problem" ), .ref = aNewComponent->GetReference(), .code = wxS( "no_footprint" ) } );
         ++m_errorCount;
         return nullptr;
     }
@@ -331,7 +354,8 @@ FOOTPRINT* BOARD_NETLIST_UPDATER::replaceFootprint( NETLIST& aNetlist, FOOTPRINT
         msg.Printf( _( "Cannot update %s (footprint '%s' not found)." ),
                     aNewComponent->GetReference(),
                     EscapeHTML( aNewComponent->GetFPID().Format().wx_str() ) );
-        m_reporter->Report( msg, RPT_SEVERITY_ERROR );
+        reportChange( msg, RPT_SEVERITY_ERROR,
+                      { .kind = wxS( "problem" ), .ref = aNewComponent->GetReference(), .footprint = wxString( aNewComponent->GetFPID().Format().wx_str() ), .code = wxS( "footprint_not_found" ) } );
         ++m_errorCount;
         return nullptr;
     }
@@ -344,7 +368,8 @@ FOOTPRINT* BOARD_NETLIST_UPDATER::replaceFootprint( NETLIST& aNetlist, FOOTPRINT
                         aFootprint->GetReference(),
                         EscapeHTML( aFootprint->GetFPID().Format().wx_str() ),
                         EscapeHTML( aNewComponent->GetFPID().Format().wx_str() ) );
-            m_reporter->Report( msg, RPT_SEVERITY_WARNING );
+            reportChange( msg, RPT_SEVERITY_WARNING,
+                          { .kind = wxS( "problem" ), .ref = aFootprint->GetReference(), .footprint = wxString( aNewComponent->GetFPID().Format().wx_str() ), .code = wxS( "locked" ) } );
             ++m_warningCount;
             delete newFootprint;
             return nullptr;
@@ -355,7 +380,8 @@ FOOTPRINT* BOARD_NETLIST_UPDATER::replaceFootprint( NETLIST& aNetlist, FOOTPRINT
                         aFootprint->GetReference(),
                         EscapeHTML( aFootprint->GetFPID().Format().wx_str() ),
                         EscapeHTML( aNewComponent->GetFPID().Format().wx_str() ) );
-            m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+            reportChange( msg, RPT_SEVERITY_ACTION,
+                          { .kind = wxS( "footprint" ), .ref = aFootprint->GetReference(), .from = wxString( aFootprint->GetFPID().Format().wx_str() ), .to = wxString( aNewComponent->GetFPID().Format().wx_str() ) } );
             ++m_newFootprintsCount;
             delete newFootprint;
             return nullptr;
@@ -369,7 +395,8 @@ FOOTPRINT* BOARD_NETLIST_UPDATER::replaceFootprint( NETLIST& aNetlist, FOOTPRINT
                         aFootprint->GetReference(),
                         EscapeHTML( aFootprint->GetFPID().Format().wx_str() ),
                         EscapeHTML( aNewComponent->GetFPID().Format().wx_str() ) );
-            m_reporter->Report( msg, RPT_SEVERITY_WARNING );
+            reportChange( msg, RPT_SEVERITY_WARNING,
+                          { .kind = wxS( "problem" ), .ref = aFootprint->GetReference(), .footprint = wxString( aNewComponent->GetFPID().Format().wx_str() ), .code = wxS( "locked" ) } );
             ++m_warningCount;
             delete newFootprint;
             return nullptr;
@@ -385,7 +412,8 @@ FOOTPRINT* BOARD_NETLIST_UPDATER::replaceFootprint( NETLIST& aNetlist, FOOTPRINT
                          aFootprint->GetReference(),
                          EscapeHTML( aFootprint->GetFPID().Format().wx_str() ),
                          EscapeHTML( aNewComponent->GetFPID().Format().wx_str() ) );
-             m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+             reportChange( msg, RPT_SEVERITY_ACTION,
+                           { .kind = wxS( "footprint" ), .ref = aFootprint->GetReference(), .from = wxString( aFootprint->GetFPID().Format().wx_str() ), .to = wxString( aNewComponent->GetFPID().Format().wx_str() ) } );
              ++m_newFootprintsCount;
              return newFootprint;
          }
@@ -426,6 +454,8 @@ bool BOARD_NETLIST_UPDATER::updateFootprintParameters( FOOTPRINT* aFootprint, CO
     // Test for reference designator field change.
     if( aFootprint->GetReference() != aNetlistComponent->GetReference() )
     {
+        const wxString oldReference = aFootprint->GetReference();
+
         if( m_isDryRun )
         {
             msg.Printf( _( "Change %s reference designator to %s." ),
@@ -442,7 +472,8 @@ bool BOARD_NETLIST_UPDATER::updateFootprintParameters( FOOTPRINT* aFootprint, CO
             aFootprint->SetReference( aNetlistComponent->GetReference() );
         }
 
-        m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+        reportChange( msg, RPT_SEVERITY_ACTION,
+                      { .kind = wxS( "reference" ), .ref = oldReference, .to = aNetlistComponent->GetReference() } );
     }
 
     // Test for value field change.
@@ -456,6 +487,8 @@ bool BOARD_NETLIST_UPDATER::updateFootprintParameters( FOOTPRINT* aFootprint, CO
 
     if( aFootprint->GetValue() != netlistValue )
     {
+        const wxString oldValue = aFootprint->GetValue();
+
         if( m_isDryRun )
         {
             msg.Printf( _( "Change %s value from %s to %s." ),
@@ -474,7 +507,8 @@ bool BOARD_NETLIST_UPDATER::updateFootprintParameters( FOOTPRINT* aFootprint, CO
             aFootprint->SetValue( netlistValue );
         }
 
-        m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+        reportChange( msg, RPT_SEVERITY_ACTION,
+                      { .kind = wxS( "value" ), .ref = aFootprint->GetReference(), .from = oldValue, .to = netlistValue } );
     }
 
     // Test for time stamp change.
@@ -485,6 +519,8 @@ bool BOARD_NETLIST_UPDATER::updateFootprintParameters( FOOTPRINT* aFootprint, CO
 
     if( aFootprint->GetPath() != new_path )
     {
+        const KIID_PATH oldPath = aFootprint->GetPath();
+
         if( m_isDryRun )
         {
             msg.Printf( _( "Update %s symbol association from %s to %s." ),
@@ -503,7 +539,8 @@ bool BOARD_NETLIST_UPDATER::updateFootprintParameters( FOOTPRINT* aFootprint, CO
             aFootprint->SetPath( new_path );
         }
 
-        m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+        reportChange( msg, RPT_SEVERITY_ACTION,
+                      { .kind = wxS( "detail" ), .ref = aFootprint->GetReference(), .from = oldPath.AsString(), .to = new_path.AsString(), .topic = wxS( "link" ) } );
     }
 
     nlohmann::ordered_map<wxString, wxString> fpFieldsAsMap;
@@ -565,7 +602,8 @@ bool BOARD_NETLIST_UPDATER::updateFootprintParameters( FOOTPRINT* aFootprint, CO
             if( m_updateFields && ( !remove_only || m_removeExtraFields ) )
             {
                 msg.Printf( _( "Update %s fields." ), aFootprint->GetReference() );
-                m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+                reportChange( msg, RPT_SEVERITY_ACTION,
+                              { .kind = wxS( "detail" ), .ref = aFootprint->GetReference(), .name = wxS( "update" ), .topic = wxS( "fields" ) } );
             }
 
             // Remove fields that aren't present in the symbol
@@ -579,7 +617,8 @@ bool BOARD_NETLIST_UPDATER::updateFootprintParameters( FOOTPRINT* aFootprint, CO
                     if( m_removeExtraFields )
                     {
                         msg.Printf( _( "Remove %s footprint fields not in symbol." ), aFootprint->GetReference() );
-                        m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+                        reportChange( msg, RPT_SEVERITY_ACTION,
+                                      { .kind = wxS( "detail" ), .ref = aFootprint->GetReference(), .name = wxS( "remove" ), .topic = wxS( "fields" ) } );
                     }
 
                     break;
@@ -591,7 +630,8 @@ bool BOARD_NETLIST_UPDATER::updateFootprintParameters( FOOTPRINT* aFootprint, CO
             if( m_updateFields && ( !remove_only || m_removeExtraFields ) )
             {
                 msg.Printf( _( "Updated %s fields." ), aFootprint->GetReference() );
-                m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+                reportChange( msg, RPT_SEVERITY_ACTION,
+                              { .kind = wxS( "detail" ), .ref = aFootprint->GetReference(), .name = wxS( "update" ), .topic = wxS( "fields" ) } );
 
                 changed = true;
 
@@ -641,7 +681,8 @@ bool BOARD_NETLIST_UPDATER::updateFootprintParameters( FOOTPRINT* aFootprint, CO
                         {
                             warned = true;
                             msg.Printf( _( "Removed %s footprint fields not in symbol." ), aFootprint->GetReference() );
-                            m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+                            reportChange( msg, RPT_SEVERITY_ACTION,
+                                          { .kind = wxS( "detail" ), .ref = aFootprint->GetReference(), .name = wxS( "remove" ), .topic = wxS( "fields" ) } );
                         }
 
                         aFootprint->Remove( field );
@@ -689,7 +730,8 @@ bool BOARD_NETLIST_UPDATER::updateFootprintParameters( FOOTPRINT* aFootprint, CO
                         EscapeHTML( sheetname ) );
         }
 
-        m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+        reportChange( msg, RPT_SEVERITY_ACTION,
+                      { .kind = wxS( "detail" ), .ref = aFootprint->GetReference(), .to = sheetname, .name = wxS( "sheetname" ), .topic = wxS( "sheet" ) } );
     }
 
     if( sheetfile != aFootprint->GetSheetfile() )
@@ -708,7 +750,8 @@ bool BOARD_NETLIST_UPDATER::updateFootprintParameters( FOOTPRINT* aFootprint, CO
                         EscapeHTML( sheetfile ) );
         }
 
-        m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+        reportChange( msg, RPT_SEVERITY_ACTION,
+                      { .kind = wxS( "detail" ), .ref = aFootprint->GetReference(), .to = sheetfile, .name = wxS( "sheetfile" ), .topic = wxS( "sheet" ) } );
     }
 
     if( fpFilters != aFootprint->GetFilters() )
@@ -727,7 +770,8 @@ bool BOARD_NETLIST_UPDATER::updateFootprintParameters( FOOTPRINT* aFootprint, CO
                         EscapeHTML( fpFilters ) );
         }
 
-        m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+        reportChange( msg, RPT_SEVERITY_ACTION,
+                      { .kind = wxS( "detail" ), .ref = aFootprint->GetReference(), .to = fpFilters, .topic = wxS( "filters" ) } );
     }
 
     bool netlistExcludeFromBOM = aNetlistComponent->GetProperties().count( wxT( "exclude_from_bom" ) ) > 0;
@@ -763,7 +807,8 @@ bool BOARD_NETLIST_UPDATER::updateFootprintParameters( FOOTPRINT* aFootprint, CO
             aFootprint->SetAttributes( attributes );
         }
 
-        m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+        reportChange( msg, RPT_SEVERITY_ACTION,
+                      { .kind = wxS( "detail" ), .ref = aFootprint->GetReference(), .to = netlistExcludeFromBOM ? wxS( "on" ) : wxS( "off" ), .name = wxS( "bom" ), .topic = wxS( "attribute" ) } );
     }
 
     bool netlistDNP = aNetlistComponent->GetProperties().count( wxT( "dnp" ) ) > 0;
@@ -799,7 +844,8 @@ bool BOARD_NETLIST_UPDATER::updateFootprintParameters( FOOTPRINT* aFootprint, CO
             aFootprint->SetAttributes( attributes );
         }
 
-        m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+        reportChange( msg, RPT_SEVERITY_ACTION,
+                      { .kind = wxS( "detail" ), .ref = aFootprint->GetReference(), .to = netlistDNP ? wxS( "on" ) : wxS( "off" ), .name = wxS( "dnp" ), .topic = wxS( "attribute" ) } );
     }
 
     bool netlistExcludeFromPosFiles = aNetlistComponent->GetProperties().count( wxT( "exclude_from_pos_files" ) ) > 0;
@@ -844,7 +890,8 @@ bool BOARD_NETLIST_UPDATER::updateFootprintParameters( FOOTPRINT* aFootprint, CO
             aFootprint->SetAttributes( attributes );
         }
 
-        m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+        reportChange( msg, RPT_SEVERITY_ACTION,
+                      { .kind = wxS( "detail" ), .ref = aFootprint->GetReference(), .to = netlistExcludeFromPosFiles ? wxS( "on" ) : wxS( "off" ), .name = wxS( "position" ), .topic = wxS( "attribute" ) } );
     }
 
     if( m_updateFields
@@ -882,7 +929,8 @@ bool BOARD_NETLIST_UPDATER::updateFootprintParameters( FOOTPRINT* aFootprint, CO
             }
         }
 
-        m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+        reportChange( msg, RPT_SEVERITY_ACTION,
+                      { .kind = wxS( "detail" ), .ref = aFootprint->GetReference(), .to = value ? wxS( "on" ) : wxS( "off" ), .name = wxS( "duplicatePads" ), .topic = wxS( "jumpers" ) } );
     }
 
     if( m_updateFields && aNetlistComponent->JumperPadGroups() != aFootprint->JumperPadGroups() )
@@ -898,7 +946,8 @@ bool BOARD_NETLIST_UPDATER::updateFootprintParameters( FOOTPRINT* aFootprint, CO
             msg.Printf( _( "Update %s jumper pad groups" ), aFootprint->GetReference() );
         }
 
-        m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+        reportChange( msg, RPT_SEVERITY_ACTION,
+                      { .kind = wxS( "detail" ), .ref = aFootprint->GetReference(), .name = wxS( "groups" ), .topic = wxS( "jumpers" ) } );
     }
 
     if( changed && copy )
@@ -978,7 +1027,8 @@ bool BOARD_NETLIST_UPDATER::updateFootprintGroup( FOOTPRINT* aPcbFootprint,
             }
         }
 
-        m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+        reportChange( msg, RPT_SEVERITY_ACTION,
+                      { .kind = wxS( "detail" ), .ref = aPcbFootprint->GetReference(), .from = existingGroup->GetName(), .topic = wxS( "group" ) } );
     }
 
     // Add to new group
@@ -1018,7 +1068,8 @@ bool BOARD_NETLIST_UPDATER::updateFootprintGroup( FOOTPRINT* aPcbFootprint,
             newGroup->AddItem( aPcbFootprint );
         }
 
-        m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+        reportChange( msg, RPT_SEVERITY_ACTION,
+                      { .kind = wxS( "detail" ), .ref = aPcbFootprint->GetReference(), .to = aNetlistComponent->GetGroup()->name, .topic = wxS( "group" ) } );
     }
 
     if( changed && copy )
@@ -1120,7 +1171,8 @@ bool BOARD_NETLIST_UPDATER::updateComponentPadConnections( FOOTPRINT* aFootprint
                                 EscapeHTML( pad->GetNumber() ) );
                 }
 
-                m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+                reportChange( msg, RPT_SEVERITY_ACTION,
+                              { .kind = wxS( "disconnect" ), .ref = aFootprint->GetReference(), .from = UnescapeString( pad->GetNetname() ), .pin = pad->GetNumber() } );
             }
             else if( pad->IsOnCopperLayer() && !pad->GetNumber().IsEmpty() )
             {
@@ -1129,7 +1181,8 @@ bool BOARD_NETLIST_UPDATER::updateComponentPadConnections( FOOTPRINT* aFootprint
                             aFootprint->GetReference(),
                             EscapeHTML( pad->GetNumber() ),
                             EscapeHTML( pad->GetNumber() ) );
-                m_reporter->Report( msg, RPT_SEVERITY_WARNING);
+                reportChange( msg, RPT_SEVERITY_WARNING,
+                              { .kind = wxS( "problem" ), .ref = aFootprint->GetReference(), .pin = pad->GetNumber(), .code = wxS( "pad_without_pin" ) } );
                 ++m_warningCount;
             }
 
@@ -1194,7 +1247,8 @@ bool BOARD_NETLIST_UPDATER::updateComponentPadConnections( FOOTPRINT* aFootprint
                     m_addedNets[netName] = netinfo;
                     msg.Printf( _( "Add net %s." ),
                                 EscapeHTML( UnescapeString( netName ) ) );
-                    m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+                    reportChange( msg, RPT_SEVERITY_ACTION,
+                                  { .kind = wxS( "net" ), .net = UnescapeString( netName ) } );
                 }
 
                 if( !pad->GetNetname().IsEmpty() )
@@ -1236,7 +1290,8 @@ bool BOARD_NETLIST_UPDATER::updateComponentPadConnections( FOOTPRINT* aFootprint
                     }
                 }
 
-                m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+                reportChange( msg, RPT_SEVERITY_ACTION,
+                              { .kind = pad->GetNetname().IsEmpty() ? wxS( "connect" ) : wxS( "reconnect" ), .ref = aFootprint->GetReference(), .from = UnescapeString( pad->GetNetname() ), .to = UnescapeString( netName ), .pin = pad->GetNumber() } );
 
                 if( !m_isDryRun )
                 {
@@ -1296,7 +1351,8 @@ bool BOARD_NETLIST_UPDATER::updateComponentUnits( FOOTPRINT* aFootprint, COMPONE
     if( m_isDryRun )
     {
         msg.Printf( _( "Update %s unit metadata." ), aFootprint->GetReference() );
-        m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+        reportChange( msg, RPT_SEVERITY_ACTION,
+                      { .kind = wxS( "detail" ), .ref = aFootprint->GetReference(), .topic = wxS( "units" ) } );
         return false; // no actual change on board during dry run
     }
 
@@ -1312,7 +1368,8 @@ bool BOARD_NETLIST_UPDATER::updateComponentUnits( FOOTPRINT* aFootprint, COMPONE
     aFootprint->SetUnitInfo( newUnits );
 
     msg.Printf( _( "Updated %s unit metadata." ), aFootprint->GetReference() );
-    m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+    reportChange( msg, RPT_SEVERITY_ACTION,
+                  { .kind = wxS( "detail" ), .ref = aFootprint->GetReference(), .topic = wxS( "units" ) } );
 
     if( copy )
         m_commit.Modified( aFootprint, copy );
@@ -1359,7 +1416,8 @@ void BOARD_NETLIST_UPDATER::applyComponentVariants( COMPONENT* aComponent,
                             EscapeHTML( fieldIt->second ),
                             variantName,
                             aComponent->GetReference() );
-                m_reporter->Report( msg, RPT_SEVERITY_ERROR );
+                reportChange( msg, RPT_SEVERITY_ERROR,
+                              { .kind = wxS( "problem" ), .ref = aComponent->GetReference(), .footprint = fieldIt->second, .name = variantName, .code = wxS( "variant_footprint" ) } );
                 ++m_errorCount;
             }
             else
@@ -1466,7 +1524,8 @@ void BOARD_NETLIST_UPDATER::applyComponentVariants( COMPONENT* aComponent,
                         fpVariant->SetDNP( targetDnp );
                 }
 
-                m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+                reportChange( msg, RPT_SEVERITY_ACTION,
+                              { .kind = wxS( "detail" ), .ref = footprint->GetReference(), .to = targetDnp ? wxS( "dnp on" ) : wxS( "dnp off" ), .name = info.name, .topic = wxS( "variant" ) } );
                 changed = true;
             }
 
@@ -1485,7 +1544,8 @@ void BOARD_NETLIST_UPDATER::applyComponentVariants( COMPONENT* aComponent,
                         fpVariant->SetExcludedFromBOM( targetExcludedFromBOM );
                 }
 
-                m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+                reportChange( msg, RPT_SEVERITY_ACTION,
+                              { .kind = wxS( "detail" ), .ref = footprint->GetReference(), .to = targetExcludedFromBOM ? wxS( "bom off" ) : wxS( "bom on" ), .name = info.name, .topic = wxS( "variant" ) } );
                 changed = true;
             }
 
@@ -1504,7 +1564,8 @@ void BOARD_NETLIST_UPDATER::applyComponentVariants( COMPONENT* aComponent,
                         fpVariant->SetExcludedFromPosFiles( targetExcludedFromPosFiles );
                 }
 
-                m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+                reportChange( msg, RPT_SEVERITY_ACTION,
+                              { .kind = wxS( "detail" ), .ref = footprint->GetReference(), .to = targetExcludedFromPosFiles ? wxS( "position off" ) : wxS( "position on" ), .name = info.name, .topic = wxS( "variant" ) } );
                 changed = true;
             }
 
@@ -1562,7 +1623,8 @@ void BOARD_NETLIST_UPDATER::applyComponentVariants( COMPONENT* aComponent,
                             fpVariant->SetFieldValue( fieldName, fieldValue );
                     }
 
-                    m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+                    reportChange( msg, RPT_SEVERITY_ACTION,
+                                  { .kind = wxS( "detail" ), .ref = footprint->GetReference(), .from = currentValue, .to = fieldValue, .name = info.name, .topic = wxS( "variant" ) } );
                     changed = true;
                 }
             }
@@ -1587,7 +1649,8 @@ void BOARD_NETLIST_UPDATER::applyComponentVariants( COMPONENT* aComponent,
                 footprint->DeleteVariant( excess );
             }
 
-            m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+            reportChange( msg, RPT_SEVERITY_ACTION,
+                          { .kind = wxS( "detail" ), .ref = footprint->GetReference(), .to = wxS( "removed" ), .name = excess, .topic = wxS( "variant" ) } );
             changed = true;
         }
 
@@ -1601,7 +1664,8 @@ void BOARD_NETLIST_UPDATER::applyComponentVariants( COMPONENT* aComponent,
                                    : _( "Added %s 'Do not place' fabrication attribute." ),
                         footprint->GetReference() );
 
-            m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+            reportChange( msg, RPT_SEVERITY_ACTION,
+                          { .kind = wxS( "detail" ), .ref = footprint->GetReference(), .to = wxS( "on" ), .name = wxS( "dnp" ), .topic = wxS( "attribute" ) } );
 
             if( !m_isDryRun )
                 footprint->SetDNP( true );
@@ -1671,7 +1735,8 @@ bool BOARD_NETLIST_UPDATER::updateCopperZoneNets( NETLIST& aNetlist )
                                 EscapeHTML( UnescapeString( originalNetname ) ),
                                 EscapeHTML( UnescapeString( updatedNetname ) ) );
 
-                    m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+                    reportChange( msg, RPT_SEVERITY_ACTION,
+                                  { .kind = wxS( "copper" ), .from = UnescapeString( originalNetname ), .to = UnescapeString( updatedNetname ), .topic = wxS( "via" ) } );
                 }
                 else
                 {
@@ -1691,7 +1756,8 @@ bool BOARD_NETLIST_UPDATER::updateCopperZoneNets( NETLIST& aNetlist )
                                     EscapeHTML( UnescapeString( originalNetname ) ),
                                     EscapeHTML( UnescapeString( updatedNetname ) ) );
 
-                        m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+                        reportChange( msg, RPT_SEVERITY_ACTION,
+                                      { .kind = wxS( "copper" ), .from = UnescapeString( originalNetname ), .to = UnescapeString( updatedNetname ), .topic = wxS( "via" ) } );
                     }
                 }
             }
@@ -1699,7 +1765,8 @@ bool BOARD_NETLIST_UPDATER::updateCopperZoneNets( NETLIST& aNetlist )
             {
                 msg.Printf( _( "Via connected to unknown net (%s)." ),
                             EscapeHTML( UnescapeString( via->GetNetname() ) ) );
-                m_reporter->Report( msg, RPT_SEVERITY_WARNING );
+                reportChange( msg, RPT_SEVERITY_WARNING,
+                              { .kind = wxS( "problem" ), .net = UnescapeString( via->GetNetname() ), .code = wxS( "via_unknown_net" ) } );
                 ++m_warningCount;
             }
         }
@@ -1774,7 +1841,8 @@ bool BOARD_NETLIST_UPDATER::updateCopperZoneNets( NETLIST& aNetlist )
                                     EscapeHTML( UnescapeString( updatedNetname ) ) );
                     }
 
-                    m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+                    reportChange( msg, RPT_SEVERITY_ACTION,
+                                  { .kind = wxS( "copper" ), .from = UnescapeString( originalNetname ), .to = UnescapeString( updatedNetname ), .name = zone->GetZoneName(), .topic = wxS( "zone" ) } );
                 }
                 else
                 {
@@ -1804,7 +1872,8 @@ bool BOARD_NETLIST_UPDATER::updateCopperZoneNets( NETLIST& aNetlist )
                                         EscapeHTML( UnescapeString( updatedNetname ) ) );
                         }
 
-                        m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+                        reportChange( msg, RPT_SEVERITY_ACTION,
+                                      { .kind = wxS( "copper" ), .from = UnescapeString( originalNetname ), .to = UnescapeString( updatedNetname ), .name = zone->GetZoneName(), .topic = wxS( "zone" ) } );
                     }
                 }
             }
@@ -1838,7 +1907,8 @@ bool BOARD_NETLIST_UPDATER::updateCopperZoneNets( NETLIST& aNetlist )
                                 zone->GetNetname() );
                 }
 
-                m_reporter->Report( msg, RPT_SEVERITY_WARNING );
+                reportChange( msg, RPT_SEVERITY_WARNING,
+                              { .kind = wxS( "problem" ), .net = UnescapeString( zone->GetNetname() ), .name = zone->GetZoneName(), .code = wxS( "zone_without_pads" ) } );
                 ++m_warningCount;
             }
         }
@@ -1879,7 +1949,8 @@ bool BOARD_NETLIST_UPDATER::updateGroups( NETLIST& aNetlist )
                 pcbGroup->SetName( netlistGroup->name );
             }
 
-            m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+            reportChange( msg, RPT_SEVERITY_ACTION,
+                          { .kind = wxS( "detail" ), .from = pcbGroup->GetName(), .to = netlistGroup->name, .name = wxS( "name" ), .topic = wxS( "group" ) } );
         }
 
         if( netlistGroup->libId != pcbGroup->GetDesignBlockLibId() )
@@ -1899,7 +1970,8 @@ bool BOARD_NETLIST_UPDATER::updateGroups( NETLIST& aNetlist )
                 pcbGroup->SetDesignBlockLibId( netlistGroup->libId );
             }
 
-            m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+            reportChange( msg, RPT_SEVERITY_ACTION,
+                          { .kind = wxS( "detail" ), .from = pcbGroup->GetDesignBlockLibId().GetUniStringLibId(), .to = netlistGroup->libId.GetUniStringLibId(), .name = wxS( "link" ), .topic = wxS( "group" ) } );
         }
     }
 
@@ -1936,7 +2008,8 @@ bool BOARD_NETLIST_UPDATER::testConnectivity( NETLIST& aNetlist,
                                "to pads in %s." ),
                             component->GetReference(),
                             EscapeHTML( footprint->GetFPID().Format().wx_str() ) );
-                m_reporter->Report( msg, RPT_SEVERITY_ERROR );
+                reportChange( msg, RPT_SEVERITY_ERROR,
+                              { .kind = wxS( "problem" ), .ref = component->GetReference(), .footprint = wxString( footprint->GetFPID().Format().wx_str() ), .code = wxS( "pins_unnumbered" ) } );
                 ++m_errorCount;
             }
             else if( !footprint->FindPadByNumber( padNumber ) )
@@ -1946,7 +2019,8 @@ bool BOARD_NETLIST_UPDATER::testConnectivity( NETLIST& aNetlist,
                             component->GetReference(),
                             EscapeHTML( padNumber ),
                             EscapeHTML( footprint->GetFPID().Format().wx_str() ) );
-                m_reporter->Report( msg, RPT_SEVERITY_ERROR );
+                reportChange( msg, RPT_SEVERITY_ERROR,
+                              { .kind = wxS( "problem" ), .ref = component->GetReference(), .footprint = wxString( footprint->GetFPID().Format().wx_str() ), .pin = padNumber, .code = wxS( "pin_without_pad" ) } );
                 ++m_errorCount;
             }
         }
@@ -2020,7 +2094,8 @@ bool BOARD_NETLIST_UPDATER::UpdateNetlist( NETLIST& aNetlist )
                            "notifications." ),
                         component->GetReference(),
                         EscapeHTML( baseFpid.Format().wx_str() ) );
-            m_reporter->Report( msg, RPT_SEVERITY_WARNING );
+            reportChange( msg, RPT_SEVERITY_WARNING,
+                          { .kind = wxS( "problem" ), .ref = component->GetReference(), .footprint = wxString( baseFpid.Format().wx_str() ), .code = wxS( "footprint_without_library" ) } );
             ++m_warningCount;
         }
 
@@ -2093,7 +2168,8 @@ bool BOARD_NETLIST_UPDATER::UpdateNetlist( NETLIST& aNetlist )
                             EscapeHTML( fieldIt->second ),
                             variantName,
                             component->GetReference() );
-                m_reporter->Report( msg, RPT_SEVERITY_ERROR );
+                reportChange( msg, RPT_SEVERITY_ERROR,
+                              { .kind = wxS( "problem" ), .ref = component->GetReference(), .footprint = fieldIt->second, .name = variantName, .code = wxS( "variant_footprint" ) } );
                 ++m_errorCount;
                 continue;
             }
@@ -2290,7 +2366,8 @@ bool BOARD_NETLIST_UPDATER::UpdateNetlist( NETLIST& aNetlist )
                             footprint->GetReference() );
             }
 
-            m_reporter->Report( msg, RPT_SEVERITY_WARNING );
+            reportChange( msg, RPT_SEVERITY_WARNING,
+                          { .kind = wxS( "problem" ), .ref = footprint->GetReference(), .footprint = wxString( footprint->GetFPID().Format().wx_str() ), .code = wxS( "locked" ) } );
             m_warningCount++;
             doDelete = false;
         }
@@ -2309,7 +2386,8 @@ bool BOARD_NETLIST_UPDATER::UpdateNetlist( NETLIST& aNetlist )
                             footprint->GetReference() );
             }
 
-            m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+            reportChange( msg, RPT_SEVERITY_ACTION,
+                          { .kind = wxS( "remove" ), .ref = footprint->GetReference(), .footprint = wxString( footprint->GetFPID().Format().wx_str() ) } );
         }
         else if( !m_isDryRun )
         {
@@ -2339,7 +2417,8 @@ bool BOARD_NETLIST_UPDATER::UpdateNetlist( NETLIST& aNetlist )
             {
                 msg.Printf( _( "Removed unused net %s." ),
                             EscapeHTML( net->GetNetname() ) );
-                m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+                reportChange( msg, RPT_SEVERITY_ACTION,
+                              { .kind = wxS( "unusedNet" ), .net = UnescapeString( net->GetNetname() ) } );
             }
         }
 
@@ -2379,7 +2458,8 @@ bool BOARD_NETLIST_UPDATER::UpdateNetlist( NETLIST& aNetlist )
                     if( !actualName.IsEmpty() )
                     {
                         msg.Printf( _( "Added variant '%s'." ), actualName );
-                        m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+                        reportChange( msg, RPT_SEVERITY_ACTION,
+                                      { .kind = wxS( "detail" ), .to = wxS( "added" ), .name = actualName, .topic = wxS( "variant" ) } );
                     }
                 }
 
@@ -2394,7 +2474,8 @@ bool BOARD_NETLIST_UPDATER::UpdateNetlist( NETLIST& aNetlist )
                 {
                     m_board->SetVariantDescription( actualName, newDescription );
                     msg.Printf( _( "Updated description for variant '%s'." ), actualName );
-                    m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+                    reportChange( msg, RPT_SEVERITY_ACTION,
+                                  { .kind = wxS( "detail" ), .to = wxS( "description" ), .name = actualName, .topic = wxS( "variant" ) } );
                 }
 
                 updatedVariantNames.push_back( actualName );
@@ -2423,7 +2504,8 @@ bool BOARD_NETLIST_UPDATER::UpdateNetlist( NETLIST& aNetlist )
             {
                 m_board->DeleteVariant( variantName );
                 msg.Printf( _( "Removed variant '%s'." ), variantName );
-                m_reporter->Report( msg, RPT_SEVERITY_ACTION );
+                reportChange( msg, RPT_SEVERITY_ACTION,
+                              { .kind = wxS( "detail" ), .to = wxS( "removed" ), .name = variantName, .topic = wxS( "variant" ) } );
             }
 
             if( !updatedVariantNames.empty() )
