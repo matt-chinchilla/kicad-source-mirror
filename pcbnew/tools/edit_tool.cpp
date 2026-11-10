@@ -58,6 +58,11 @@
 #include <tools/pcb_point_editor.h>
 #include <tools/tool_event_utils.h>
 #include <tools/pcb_grid_helper.h>
+
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#include <json_common.h>
+#endif
 #include <tools/pad_tool.h>
 #include <view/view_controls.h>
 #include <connectivity/connectivity_algo.h>
@@ -2292,6 +2297,94 @@ int EDIT_TOOL::BooleanPolygons( const TOOL_EVENT& aEvent )
 }
 
 
+#ifdef __EMSCRIPTEN__
+// The in-browser editor's host draws its own window for the board items it edits:
+// window.kicadProperties.onRequest(json) with { type: "board", uuid, kind, field? }
+// answering truthy takes the request. No listener, a falsy answer or a throwing
+// listener leaves it to KiCad's dialog.
+static bool askHostForBoardProperties( BOARD_ITEM* aItem, const char* aKind,
+                                       const wxString& aFieldName )
+{
+    nlohmann::json req;
+    req["type"] = "board";
+    req["uuid"] = aItem->m_Uuid.AsString().ToStdString( wxConvUTF8 );
+    req["kind"] = aKind;
+
+    if( !aFieldName.IsEmpty() )
+        req["field"] = aFieldName.ToStdString( wxConvUTF8 );
+
+    const std::string text = req.dump( -1, ' ', false, nlohmann::json::error_handler_t::replace );
+
+    int taken = EM_ASM_INT( {
+        if( !window.kicadProperties || typeof window.kicadProperties.onRequest !== 'function' )
+            return 0;
+
+        // A throwing listener must never unwind the wasm frame that called it.
+        try { return window.kicadProperties.onRequest( UTF8ToString( $0 ) ) ? 1 : 0; }
+        catch( e ) { console.error( '[cc properties] onRequest listener threw', e ); return 0; }
+    }, text.c_str() );
+
+    return taken != 0;
+}
+
+
+// The item the host's window edits for a one-item selection, with its kind and
+// the field's name when a footprint's field was asked; nullptr when the host's
+// window does not edit this kind (KiCad's dialog then opens as before).
+static BOARD_ITEM* hostPropertiesSubject( BOARD_ITEM* aItem, const char*& aKind,
+                                          wxString& aFieldName )
+{
+    switch( aItem->Type() )
+    {
+    case PCB_FOOTPRINT_T:
+        aKind = "footprint";
+        return aItem;
+
+    case PCB_FIELD_T:
+    case PCB_TEXT_T:
+        if( FOOTPRINT* fp = aItem->GetParentFootprint() )
+        {
+            if( aItem->Type() == PCB_FIELD_T )
+                aFieldName = static_cast<PCB_FIELD*>( aItem )->GetName();
+
+            aKind = "footprint";
+            return fp;
+        }
+
+        if( aItem->Type() == PCB_TEXT_T )
+        {
+            aKind = "text";
+            return aItem;
+        }
+
+        return nullptr;
+
+    case PCB_TRACE_T: aKind = "track"; return aItem;
+    case PCB_ARC_T:   aKind = "arc";   return aItem;
+    case PCB_VIA_T:   aKind = "via";   return aItem;
+
+    case PCB_ZONE_T:
+    {
+        ZONE* zone = static_cast<ZONE*>( aItem );
+
+        if( zone->GetIsRuleArea() || zone->GetParentFootprint() )
+            return nullptr;
+
+        aKind = "zone";
+        return aItem;
+    }
+
+    case PCB_MARKER_T:
+        aKind = "marker";
+        return aItem;
+
+    default:
+        return nullptr;
+    }
+}
+#endif
+
+
 int EDIT_TOOL::Properties( const TOOL_EVENT& aEvent )
 {
     PCB_BASE_EDIT_FRAME* editFrame = getEditFrame<PCB_BASE_EDIT_FRAME>();
@@ -2299,6 +2392,34 @@ int EDIT_TOOL::Properties( const TOOL_EVENT& aEvent )
             []( const VECTOR2I& aPt, GENERAL_COLLECTOR& aCollector, PCB_SELECTION_TOOL* sTool )
             {
             } );
+
+#ifdef __EMSCRIPTEN__
+    // The in-browser editor's host edits one footprint (or its field or text), track,
+    // arc, via, copper zone, board text or check mark in its own window: asked first,
+    // a truthy answer opens no KiCad dialog and leaves that item (a field or text
+    // gives way to its footprint) the one selected, no longer a hover selection.
+    if( !m_isFootprintEditor && selection.Size() == 1 && selection.Front()->IsBOARD_ITEM() )
+    {
+        const char* kind = nullptr;
+        wxString    fieldName;
+        BOARD_ITEM* asked = hostPropertiesSubject( static_cast<BOARD_ITEM*>( selection.Front() ),
+                                                   kind, fieldName );
+
+        if( asked && askHostForBoardProperties( asked, kind, fieldName ) )
+        {
+            PCB_SELECTION& sel = m_selectionTool->GetSelection();
+
+            if( sel.GetSize() != 1 || sel.Front() != asked )
+            {
+                m_selectionTool->ClearSelection( true );
+                m_selectionTool->AddItemToSel( asked );
+            }
+
+            m_selectionTool->GetSelection().SetIsHover( false );
+            return 0;
+        }
+    }
+#endif
 
     // Tracks & vias are treated in a special way:
     if( ( SELECTION_CONDITIONS::OnlyTypes( { PCB_TRACE_T, PCB_ARC_T, PCB_VIA_T } ) )( selection ) )
