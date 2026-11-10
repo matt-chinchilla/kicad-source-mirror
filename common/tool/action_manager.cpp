@@ -33,6 +33,11 @@
 #include <hotkeys_basic.h>
 #include <cctype>
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#include <json_common.h>
+#endif
+
 
 ACTION_MANAGER::ACTION_MANAGER( TOOL_MANAGER* aToolManager ) :
     m_toolMgr( aToolManager )
@@ -140,6 +145,33 @@ TOOL_ACTION* ACTION_MANAGER::FindAction( const std::string& aActionName ) const
 }
 
 
+#ifdef __EMSCRIPTEN__
+// The in-browser editor's host may hold a hotkey's action for a window of its own:
+// window.kicadHostAction.onRequest(json) with { action: <the action's name> }
+// answering truthy takes the key, and the action does not run. No listener, a
+// falsy answer or a throwing listener runs KiCad's action as before. Only keys
+// pass here: a menu or toolbar press reaches TOOL_MANAGER::RunAction directly.
+static bool hostHoldsAction( const TOOL_ACTION& aAction )
+{
+    nlohmann::json req;
+    req["action"] = aAction.GetName();
+
+    const std::string text = req.dump( -1, ' ', false, nlohmann::json::error_handler_t::replace );
+
+    int taken = EM_ASM_INT( {
+        if( !window.kicadHostAction || typeof window.kicadHostAction.onRequest !== 'function' )
+            return 0;
+
+        // A throwing listener must never unwind the wasm frame that called it.
+        try { return window.kicadHostAction.onRequest( UTF8ToString( $0 ) ) ? 1 : 0; }
+        catch( e ) { console.error( '[cc held] onRequest listener threw', e ); return 0; }
+    }, text.c_str() );
+
+    return taken != 0;
+}
+#endif
+
+
 bool ACTION_MANAGER::RunHotKey( int aHotKey ) const
 {
     int key = aHotKey & ~MD_MODIFIER_MASK;
@@ -222,7 +254,13 @@ bool ACTION_MANAGER::RunHotKey( int aHotKey ) const
                     KeyNameFromKeyCode( aHotKey ) );
 
         if( runAction )
+        {
+#ifdef __EMSCRIPTEN__
+            if( hostHoldsAction( *context ) )
+                return true;
+#endif
             return m_toolMgr->RunAction( *context );
+        }
     }
     else if( !global.empty() )
     {
@@ -238,6 +276,11 @@ bool ACTION_MANAGER::RunHotKey( int aHotKey ) const
                         runAction ? wxS( "Running" ) : wxS( "Not running" ),
                         act->GetName(),
                         KeyNameFromKeyCode( aHotKey ) );
+
+#ifdef __EMSCRIPTEN__
+            if( runAction && hostHoldsAction( *act ) )
+                return true;
+#endif
 
             if( runAction && m_toolMgr->RunAction( *act ) )
                 return true;
