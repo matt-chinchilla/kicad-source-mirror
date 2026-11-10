@@ -2306,6 +2306,29 @@ int SCH_EDIT_TOOL::DoDelete( const TOOL_EVENT& aEvent )
 
 void SCH_EDIT_TOOL::editFieldText( SCH_FIELD* aField )
 {
+#ifdef __EMSCRIPTEN__
+    // U, V and F (and any field of a symbol edited on its own) ask the in-browser
+    // editor's host first, as Properties does for the symbol: a truthy answer opens
+    // the host's window on that field, and no commit and no KiCad dialog follow. The
+    // symbol is left the one selected, as Properties leaves it. A sheet's field, or
+    // any field no host takes, keeps KiCad's dialog.
+    if( EDA_ITEM* parent = aField->GetParent();
+            parent && parent->Type() == SCH_SYMBOL_T
+            && askHostForProperties( parent, aField->GetName() ) )
+    {
+        SCH_SELECTION& selection = m_selectionTool->GetSelection();
+
+        if( selection.GetSize() != 1 || selection.Front() != parent )
+        {
+            m_selectionTool->ClearSelection( true );
+            m_selectionTool->AddItemToSel( parent );
+        }
+
+        m_selectionTool->GetSelection().SetIsHover( false );
+        return;
+    }
+#endif
+
     KICAD_T    parentType = aField->GetParent() ? aField->GetParent()->Type() : SCHEMATIC_T;
     SCH_COMMIT commit( m_toolMgr );
 
