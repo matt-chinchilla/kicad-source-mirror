@@ -728,4 +728,21 @@ namespace std
     };
 }
 
+// libc++ 22 (the WebAssembly build's, emscripten 6.0.6) looks keys up in std::map and std::set
+// through __make_transparent, which turns less<T> into less<> and so calls VECTOR2::operator<
+// (it compares lengths) in place of the specialization above: two points of equal length were
+// one key, and the schematic joined every connection point at (x, y) to the one at (y, x).
+// Keep the specialization for VECTOR2I keys. libstdc++ and MSVC have no such lookup.
+#if defined( _LIBCPP_VERSION ) && __has_include( <__type_traits/make_transparent.h> )
+#include <__type_traits/make_transparent.h>
+
+_LIBCPP_BEGIN_NAMESPACE_STD
+template <>
+struct __make_transparent<VECTOR2I, less<VECTOR2I>>
+{
+    using type = less<VECTOR2I>;
+};
+_LIBCPP_END_NAMESPACE_STD
+#endif
+
 #endif    // VECTOR2D_H_
