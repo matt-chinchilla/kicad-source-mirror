@@ -44,6 +44,9 @@
 
 using namespace KIGFX;
 
+/// WebGL's CONTEXT_LOST_WEBGL: what glGetError answers once after the browser took the context away.
+static const GLenum WEBGL_CONTEXT_LOST = 0x9242;
+
 WEBGL_COMPOSITOR::WEBGL_COMPOSITOR() :
         m_initialized( false ),
         m_curBuffer( 0 ),
@@ -389,17 +392,13 @@ void WEBGL_COMPOSITOR::SetBuffer( unsigned int aBufferHandle )
         //    simultaneously (illegal feedback loop), even if glDrawBuffers routes
         //    writes elsewhere — so all buffers must share ATTACHMENT0
 
-        // Clear stale GL errors from prior draw calls so they don't get attributed
-        // to this texture re-attachment (bindFb only clears when the FBO changes).
-        while( glGetError() != GL_NO_ERROR ) {}
-
+        // No glGetError here: this runs several times a frame, and in a browser every
+        // glGetError waits for the GPU process. Begin() reads the error queue once a frame.
         glFramebufferTexture2DEXT( GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0,
                                    GL_TEXTURE_2D, m_buffers[m_curBuffer].textureTarget, 0 );
-        checkGlError( "reattaching buffer texture", __FILE__, __LINE__ );
 
         GLenum drawBuffers[] = { GL_COLOR_ATTACHMENT0 };
         glDrawBuffers( 1, drawBuffers );
-        checkGlError( "setting draw buffer", __FILE__, __LINE__ );
 
         glViewport( 0, 0, m_buffers[m_curBuffer].dimensions.x, m_buffers[m_curBuffer].dimensions.y );
     }
@@ -431,6 +430,20 @@ VECTOR2I WEBGL_COMPOSITOR::GetScreenSize() const
 
 void WEBGL_COMPOSITOR::Begin()
 {
+    // The frame's one read of the GL error queue. SetBuffer and bindFb used to drain the
+    // queue and then check their own two calls, five glGetError a draw, and in a browser
+    // each one is a synchronous wait for the GPU process: a tenth of the editor's time
+    // while the pointer moved, with never an error among them. Their calls bind a
+    // framebuffer and a texture this compositor made, which fail only on a programming
+    // error or a lost context. Errors left by draw calls are dropped here, as those drains
+    // dropped them, so the checks that guard allocation still read their own call; a lost
+    // context is the one error acted on, and the canvas falls back as for any GL failure.
+    for( GLenum err = glGetError(); err != GL_NO_ERROR; err = glGetError() )
+    {
+        if( err == WEBGL_CONTEXT_LOST )
+            throw std::runtime_error( "The WebGL context was lost" );
+    }
+
     m_antialiasing->Begin();
 }
 
@@ -485,13 +498,8 @@ void WEBGL_COMPOSITOR::bindFb( unsigned int aFb )
 
     if( m_curFbo != aFb )
     {
-        // In WebGL 2.0, GL errors from draw calls can accumulate in the error queue
-        // (e.g. from rendering to buffers with mismatched draw buffer routing).
-        // Clear stale errors so they don't get falsely attributed to this FBO switch.
-        while( glGetError() != GL_NO_ERROR ) {}
-
+        // No glGetError here either (see SetBuffer): Begin() reads the queue once a frame.
         glBindFramebufferEXT( GL_FRAMEBUFFER, aFb );
-        checkGlError( "switching framebuffer", __FILE__, __LINE__ );
         m_curFbo = aFb;
     }
 }
