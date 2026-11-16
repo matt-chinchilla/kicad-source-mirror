@@ -146,15 +146,17 @@ TOOL_ACTION* ACTION_MANAGER::FindAction( const std::string& aActionName ) const
 
 
 #ifdef __EMSCRIPTEN__
-// The in-browser editor's host may hold a hotkey's action for a window of its own:
+// The in-browser editor's host may hold an action for a window of its own:
 // window.kicadHostAction.onRequest(json) with { action: <the action's name> }
-// answering truthy takes the key, and the action does not run. No listener, a
-// falsy answer or a throwing listener runs KiCad's action as before. Only keys
-// pass here: a menu or toolbar press reaches TOOL_MANAGER::RunAction directly.
-static bool hostHoldsAction( const TOOL_ACTION& aAction )
+// answering truthy takes it, and the action does not run. No listener, a falsy
+// answer or a throwing listener runs KiCad's action as before. RunHotKey asks
+// for keys; a tool whose action opens a window of KiCad's own asks with the
+// action's name (SCH_INSPECTION_TOOL::RunSimulation), so a menu or toolbar
+// press is held there too.
+bool hostHoldsAction( const std::string& aActionName )
 {
     nlohmann::json req;
-    req["action"] = aAction.GetName();
+    req["action"] = aActionName;
 
     const std::string text = req.dump( -1, ' ', false, nlohmann::json::error_handler_t::replace );
 
@@ -168,6 +170,12 @@ static bool hostHoldsAction( const TOOL_ACTION& aAction )
     }, text.c_str() );
 
     return taken != 0;
+}
+
+
+static bool hostHoldsAction( const TOOL_ACTION& aAction )
+{
+    return hostHoldsAction( aAction.GetName() );
 }
 #endif
 
