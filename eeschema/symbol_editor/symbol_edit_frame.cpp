@@ -91,6 +91,10 @@
 #include <wx/log.h>
 #include <trace_helpers.h>
 
+#ifdef __EMSCRIPTEN__
+#include <algorithm>
+#endif
+
 
 bool SYMBOL_EDIT_FRAME::m_showDeMorgan = false;
 
@@ -312,6 +316,26 @@ SYMBOL_EDIT_FRAME::~SYMBOL_EDIT_FRAME()
         delete screen;
         m_isSymbolFromSchematic = false;
     }
+
+#ifdef __EMSCRIPTEN__
+    // A symbol the host opened lives on a screen of its own, not on a library buffer's (a
+    // placed one was freed just above). The tools are shut down: no selection to clear.
+    if( m_ccHost )
+    {
+        ClearUndoRedoList();
+
+        SCH_SCREEN* screen = GetScreen();
+
+        delete m_symbol;
+        m_symbol = nullptr;
+
+        if( screen && screen != m_dummyScreen )
+            delete screen;
+
+        m_ccHost = false;
+        ccFreeAncestors();
+    }
+#endif
 
     // current screen is destroyed in EDA_DRAW_FRAME
     SetScreen( m_dummyScreen );
@@ -854,6 +878,12 @@ void SYMBOL_EDIT_FRAME::OnSelectBodyStyle( wxCommandEvent& event )
 
 bool SYMBOL_EDIT_FRAME::IsSymbolFromLegacyLibrary() const
 {
+#ifdef __EMSCRIPTEN__
+    // The host's symbol has no library row to ask about.
+    if( m_ccHost )
+        return false;
+#endif
+
     if( m_symbol )
     {
         SYMBOL_LIBRARY_ADAPTER* adapter = PROJECT_SCH::SymbolLibAdapter( &Prj() );
@@ -945,6 +975,16 @@ void SYMBOL_EDIT_FRAME::SetCurSymbol( LIB_SYMBOL* aSymbol, bool aUpdateZoom )
 
     GetCanvas()->Refresh();
     m_propertiesPanel->UpdateData();
+
+#ifdef __EMSCRIPTEN__
+    // The host's symbol has no library and no schematic for the info bar to point at, and
+    // the host draws its own lines: nothing of KiCad's info bar shows for it.
+    if( m_ccHost )
+    {
+        GetInfoBar()->Dismiss();
+        return;
+    }
+#endif
 
     WX_INFOBAR& infobar = *GetInfoBar();
     infobar.RemoveAllButtons();
@@ -1340,6 +1380,13 @@ wxString SYMBOL_EDIT_FRAME::getTargetLib() const
 void SYMBOL_EDIT_FRAME::SyncLibraries( bool aShowProgress, bool aPreloadCancelled,
                                        const wxString& aForceRefresh )
 {
+#ifdef __EMSCRIPTEN__
+    // The WebAssembly editor never shows the library tree, and its tree holds only the
+    // project's own libraries (SYMBOL_TREE_SYNCHRONIZING_ADAPTER::Sync), so no progress box
+    // ever opens over the canvas for a sync.
+    aShowProgress = false;
+#endif
+
     // Prevent re-entrant calls.  The progress dialog yields the event loop during Sync(),
     // which can dispatch queued UI events (e.g. menu clicks queued while the app was busy
     // loading libraries).  A re-entrant call would corrupt the library tree mid-rebuild.
@@ -1473,6 +1520,12 @@ bool SYMBOL_EDIT_FRAME::backupFile( const wxFileName& aOriginalFile, const wxStr
 
 void SYMBOL_EDIT_FRAME::storeCurrentSymbol()
 {
+#ifdef __EMSCRIPTEN__
+    // The host's symbol is never stored in a library buffer: the host writes it.
+    if( m_ccHost )
+        return;
+#endif
+
     if( m_symbol && !GetCurLib().IsEmpty() && GetScreen()->IsContentModified() )
         m_libMgr->UpdateSymbol( m_symbol, GetCurLib() ); // UpdateSymbol() makes a copy
 }
@@ -1490,6 +1543,10 @@ bool SYMBOL_EDIT_FRAME::IsCurrentSymbol( const LIB_ID& aLibId ) const
 
 void SYMBOL_EDIT_FRAME::emptyScreen()
 {
+#ifdef __EMSCRIPTEN__
+    ccLeaveHost();
+#endif
+
     GetLibTree()->Unselect();
     SetCurLib( wxEmptyString );
     SetCurSymbol( nullptr, false );
@@ -1924,6 +1981,10 @@ SELECTION& SYMBOL_EDIT_FRAME::GetCurrentSelection()
 
 void SYMBOL_EDIT_FRAME::LoadSymbolFromSchematic( SCH_SYMBOL* aSymbol )
 {
+#ifdef __EMSCRIPTEN__
+    ccLeaveHost();
+#endif
+
     std::unique_ptr<LIB_SYMBOL> symbol = aSymbol->GetLibSymbolRef()->Flatten();
     wxCHECK( symbol, /* void */ );
 
@@ -2198,3 +2259,122 @@ bool SYMBOL_EDIT_FRAME::GetShowInvisiblePins()
     // Returns the current render option for invisible pins
     return libeditconfig()->m_ShowHiddenPins;
 }
+
+
+#ifdef __EMSCRIPTEN__
+void SYMBOL_EDIT_FRAME::ccFreeAncestors()
+{
+    for( LIB_SYMBOL* ancestor : m_ccAncestors )
+        delete ancestor;
+
+    m_ccAncestors.clear();
+}
+
+
+void SYMBOL_EDIT_FRAME::ccLeaveHost()
+{
+    if( !m_ccHost )
+        return;
+
+    // Nothing may keep pointing at the items about to go: the selection and the view first.
+    m_toolManager->RunAction( ACTIONS::selectionClear );
+    GetCanvas()->GetView()->Clear();
+
+    // Undo copies of a derived symbol hold its parent by a weak reference only; they go
+    // before the parent does.
+    ClearUndoRedoList();
+
+    SCH_SCREEN* screen = GetScreen();
+
+    delete m_symbol;
+    m_symbol = nullptr;
+
+    if( screen && screen != m_dummyScreen )
+    {
+        SetScreen( m_dummyScreen );
+        delete screen;
+    }
+
+    m_ccHost = false;
+    m_ccLib.clear();
+    m_isSymbolFromSchematic = false;
+    m_reference.clear();
+}
+
+
+void SYMBOL_EDIT_FRAME::CcHostOpen( LIB_SYMBOL* aSymbol, const std::vector<LIB_SYMBOL*>& aAncestors,
+                                    const wxString& aLib, bool aFromSchematic, int aUnit,
+                                    int aBodyStyle )
+{
+    wxCHECK( aSymbol && m_toolManager, /* void */ );
+
+    m_toolManager->RunAction( ACTIONS::cancelInteractive );
+
+    // Whatever was open goes first: a host symbol with its own screen, a placed symbol with
+    // its own screen (as KiCad's own loads free them), or a library buffer's symbol (whose
+    // screen is the buffer's and stays).
+    if( m_ccHost )
+    {
+        ccLeaveHost();
+    }
+    else if( m_isSymbolFromSchematic )
+    {
+        SCH_SCREEN* screen = GetScreen();
+
+        m_toolManager->RunAction( ACTIONS::selectionClear );
+        GetCanvas()->GetView()->Clear();
+        ClearUndoRedoList();
+        delete m_symbol;
+        m_symbol = nullptr;
+
+        if( screen && screen != m_dummyScreen )
+        {
+            SetScreen( m_dummyScreen );
+            delete screen;
+        }
+
+        m_isSymbolFromSchematic = false;
+    }
+    else if( m_symbol )
+    {
+        ClearUndoRedoList();
+        SetCurSymbol( nullptr, false );
+        SetScreen( m_dummyScreen );
+    }
+
+    ccFreeAncestors();
+    m_ccAncestors = aAncestors;
+
+    // No library row: the symbol is not the current library's, so nothing stores it there.
+    SetCurLib( wxEmptyString );
+
+    m_ccHost = true;
+    m_ccLib = aLib;
+    m_isSymbolFromSchematic = aFromSchematic;
+    m_schematicSymbolUUID = niluuid;
+    m_reference = aSymbol->GetReferenceField().GetText();
+    m_unit = std::clamp( aUnit, 1, std::max( 1, aSymbol->GetUnitCount() ) );
+    m_bodyStyle = std::clamp( aBodyStyle, 1, std::max( 1, aSymbol->GetBodyStyleCount() ) );
+
+    // As LoadSymbolFromSchematic: locked units usually mean graphics specific to each unit.
+    if( SYMBOL_EDITOR_DRAWING_TOOLS* tools = GetToolManager()->GetTool<SYMBOL_EDITOR_DRAWING_TOOLS>() )
+        tools->SetDrawSpecificUnit( aSymbol->UnitsLocked() );
+
+    SetScreen( new SCH_SCREEN() );
+    SetCurSymbol( aSymbol, true );
+    setSymWatcher( nullptr );
+
+    UpdateTitle();
+    RebuildSymbolUnitAndBodyStyleLists();
+    UpdateSymbolMsgPanelInfo();
+
+    // A fresh symbol: nothing to undo, nothing modified.
+    ClearUndoRedoList();
+    GetScreen()->SetContentModified( false );
+
+    m_toolManager->ResetTools( TOOL_BASE::MODEL_RELOAD );
+
+    GetCanvas()->GetView()->UpdateAllItems( KIGFX::ALL );
+    GetCanvas()->Refresh();
+}
+#endif

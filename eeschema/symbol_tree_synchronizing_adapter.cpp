@@ -139,6 +139,15 @@ void SYMBOL_TREE_SYNCHRONIZING_ADAPTER::Sync( const wxString& aForceRefresh,
             auto optRow = adapter->GetRow( libName );
             wxCHECK2( optRow.has_value(), continue );
 
+#ifdef __EMSCRIPTEN__
+            // The WebAssembly editor's tree holds the project's own libraries only (their rows'
+            // uri starts /mnt/pcbjam/prj.): its host is the symbol browser, and enumerating
+            // every library of the mirror here cost seconds and about 650 MB of engine memory
+            // at every symbol editor boot.
+            if( !( *optRow )->URI().StartsWith( wxS( "/mnt/pcbjam/prj." ) ) )
+                continue;
+#endif
+
             bool pinned = alg::contains( cfg->m_Session.pinned_symbol_libs, libName )
                             || alg::contains( project.m_PinnedSymbolLibs, libName );
 

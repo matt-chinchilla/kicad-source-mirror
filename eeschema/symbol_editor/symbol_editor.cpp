@@ -277,6 +277,11 @@ bool SYMBOL_EDIT_FRAME::LoadOneLibrarySymbolAux( LIB_SYMBOL* aEntry, const wxStr
 
     m_toolManager->RunAction( ACTIONS::cancelInteractive );
 
+#ifdef __EMSCRIPTEN__
+    // A symbol the WebAssembly editor's host opened has no library buffer: it goes first.
+    ccLeaveHost();
+#endif
+
     // Symbols from the schematic are edited in place and not managed by the library manager.
     if( IsSymbolFromSchematic() )
     {

@@ -409,6 +409,32 @@ public:
 
     void ClearToolbarControl( int aId ) override;
 
+#ifdef __EMSCRIPTEN__
+    /**
+     * The WebAssembly editor's host mode: open \a aSymbol (taken over) as the edited symbol
+     * with NO library row. The host holds the symbol's text and writes it itself, so the
+     * library manager, the library tree and the library save are never reached for it.
+     *
+     * @param aSymbol the symbol to edit; owned by the frame from here on.
+     * @param aAncestors the symbols \a aSymbol derives from (its parent first), owned by the
+     *                   frame for as long as the symbol is open (a derived symbol only holds a
+     *                   weak reference to its parent).
+     * @param aLib the library nickname the host files the symbol under (its LIB_ID's).
+     * @param aFromSchematic true to edit it as KiCad edits a placed symbol (title and undo of
+     *                       the from-schematic mode).
+     * @param aUnit the unit to show, clamped.
+     * @param aBodyStyle the body style to show, clamped.
+     */
+    void CcHostOpen( LIB_SYMBOL* aSymbol, const std::vector<LIB_SYMBOL*>& aAncestors,
+                     const wxString& aLib, bool aFromSchematic, int aUnit, int aBodyStyle );
+
+    /// True while the open symbol came from CcHostOpen.
+    bool CcHostMode() const { return m_ccHost; }
+
+    /// The library nickname the host gave CcHostOpen.
+    const wxString& CcHostLib() const { return m_ccLib; }
+#endif
+
 protected:
     void configureToolbars() override;
     void setupUIConditions() override;
@@ -519,6 +545,18 @@ private:
      * @return true if successful or false if a failure occurs.
      */
     bool replaceLibTableEntry( const wxString& aLibNickname, const wxString& aLibFile );
+
+#ifdef __EMSCRIPTEN__
+    /// Leave the host mode: the host's symbol, its screen and its ancestors are freed.
+    void ccLeaveHost();
+
+    /// Free the ancestors CcHostOpen took.
+    void ccFreeAncestors();
+
+    bool                     m_ccHost = false;
+    wxString                 m_ccLib;
+    std::vector<LIB_SYMBOL*> m_ccAncestors;
+#endif
 
     DECLARE_EVENT_TABLE()
 
