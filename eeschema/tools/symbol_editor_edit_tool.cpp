@@ -58,6 +58,10 @@
 #include <sch_painter.h>
 #include <sch_plotter.h>
 #include <locale_io.h>
+
+#ifdef __EMSCRIPTEN__
+#include <tools/symbol_editor_host.h>
+#endif
 #include <gal/gal_print.h>
 #include <gal/graphics_abstraction_layer.h>
 #include <zoom_defines.h>
@@ -886,11 +890,45 @@ int SYMBOL_EDITOR_EDIT_TOOL::Properties( const TOOL_EVENT& aEvent )
         }
 
         if( m_frame->GetCurSymbol() )
+        {
+#ifdef __EMSCRIPTEN__
+            // The WebAssembly editor's host draws its own Symbol window (ev.symedit).
+            if( CcAskHostSymEdit( "symbol", nullptr, false ) )
+                return 0;
+#endif
+
             editSymbolProperties();
+        }
     }
     else if( selection.Size() == 1 )
     {
         SCH_ITEM* item = static_cast<SCH_ITEM*>( selection.Front() );
+
+#ifdef __EMSCRIPTEN__
+        // The WebAssembly editor's host draws its own window for a pin, field, text, text box
+        // or shape (ev.symedit): asked before the undo copy is taken, so a request the host
+        // takes leaves no undo step; the item stays the one selected (no longer a hover
+        // selection). Pin, shape, text, text box and field dialogs open only when it declines.
+        {
+            const char* ask = nullptr;
+
+            switch( item->Type() )
+            {
+            case SCH_PIN_T:     ask = "pin";     break;
+            case SCH_SHAPE_T:   ask = "shape";   break;
+            case SCH_TEXT_T:    ask = "text";    break;
+            case SCH_TEXTBOX_T: ask = "textbox"; break;
+            case SCH_FIELD_T:   ask = "field";   break;
+            default:                             break;
+            }
+
+            if( ask && CcAskHostSymEdit( ask, &item->m_Uuid, item->IsNew() ) )
+            {
+                selection.SetIsHover( false );
+                return 0;
+            }
+        }
+#endif
 
         // Save copy for undo if not in edit (edit command already handle the save copy)
         if( item->GetEditFlags() == 0 )

@@ -34,6 +34,10 @@
 #include <pgm_base.h>
 #include <wx/debug.h>
 
+#ifdef __EMSCRIPTEN__
+#include <tools/symbol_editor_host.h>
+#endif
+
 
 static ELECTRICAL_PINTYPE g_LastPinType            = ELECTRICAL_PINTYPE::PT_INPUT;
 static PIN_ORIENTATION    g_LastPinOrient          = PIN_ORIENTATION::PIN_RIGHT;
@@ -117,15 +121,27 @@ bool SYMBOL_EDITOR_PIN_TOOL::Init()
 bool SYMBOL_EDITOR_PIN_TOOL::EditPinProperties( SCH_PIN* aPin, bool aFocusPinNumber )
 {
     SCH_PIN               original_pin( *aPin );
-    DIALOG_PIN_PROPERTIES dlg( m_frame, aPin, aFocusPinNumber );
     SCH_COMMIT            commit( m_frame );
     LIB_SYMBOL*           parentSymbol = static_cast<LIB_SYMBOL*>( aPin->GetParentSymbol() );
 
     if( aPin->GetEditFlags() == 0 )
         commit.Modify( parentSymbol, m_frame->GetScreen() );
 
-    if( dlg.ShowModal() == wxID_CANCEL )
-        return false;
+#ifdef __EMSCRIPTEN__
+    // A NEW pin (the pin tool's CreatePin) asks the WebAssembly editor's host first
+    // (ev.symedit, isNew): a truthy answer is the dialog's OK with the defaults the tool
+    // gave the pin, so it is placed as it is and the host's window edits it after. An
+    // existing pin was asked already, by SYMBOL_EDITOR_EDIT_TOOL::Properties.
+    bool hostTook = aPin->IsNew() && CcAskHostSymEdit( "pin", &aPin->m_Uuid, true );
+
+    if( !hostTook )
+#endif
+    {
+        DIALOG_PIN_PROPERTIES dlg( m_frame, aPin, aFocusPinNumber );
+
+        if( dlg.ShowModal() == wxID_CANCEL )
+            return false;
+    }
 
     if( !aPin->IsNew() && m_frame->SynchronizePins() && parentSymbol )
     {
