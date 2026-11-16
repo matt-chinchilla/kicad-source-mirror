@@ -950,6 +950,14 @@ if( EMSCRIPTEN )
     target_sources( pcbnew_kiface_objects PRIVATE ${PCBNEW_WASM_STUBS} )
 endif()
 
+if( EMSCRIPTEN AND KICAD_BUILD_3D_VIEWER_WASM )
+    # The VRML exporter writes through the 3D model cache and the scene graph library, which
+    # an image with the 3D viewer links (3d-viewer, kicad_3dsg): it carries the real exporter
+    # (exporters/exporter_vrml.cpp) in place of its stubs (the WebAssembly editor's
+    # project.export, pcb_export_3d in VRML, engine run 14).
+    target_compile_definitions( pcbnew_kiface_objects PRIVATE KICAD_WASM_VRML_EXPORT )
+endif()
+
 if( EMSCRIPTEN AND KICAD_WASM_MERGED_EDITOR )
     # Merged editor image: statically bind this kiface's Kiface() calls to its own
     # accessor and rename the symbols eeschema also defines (see the rename list and
