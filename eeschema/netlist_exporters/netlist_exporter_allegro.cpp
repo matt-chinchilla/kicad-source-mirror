@@ -22,6 +22,7 @@
  */
 
 #include <confirm.h>
+#include <reporter.h>
 #include <refdes_utils.h>
 #include <sch_edit_frame.h>
 #include <sch_reference_list.h>
@@ -41,6 +42,10 @@ bool NETLIST_EXPORTER_ALLEGRO::WriteNetlist( const wxString& aOutFileName,
 {
     m_f = nullptr;
     bool success = true;
+
+#ifdef __EMSCRIPTEN__
+    m_reporter = &aReporter;
+#endif
 
     // Create the devices directory
     m_exportPath = wxFileName( aOutFileName ).GetPath( wxPATH_GET_VOLUME | wxPATH_GET_SEPARATOR )
@@ -554,7 +559,17 @@ void NETLIST_EXPORTER_ALLEGRO::toAllegroPackages()
     }
 
     if( !deviceFileCreatingError.IsEmpty() )
+    {
+#ifdef __EMSCRIPTEN__
+        // The WebAssembly editor runs this export with no KiCad window.
+        if( m_reporter )
+        {
+            m_reporter->Report( deviceFileCreatingError, RPT_SEVERITY_ERROR );
+            return;
+        }
+#endif
         DisplayError( nullptr, deviceFileCreatingError );
+    }
 }
 
 

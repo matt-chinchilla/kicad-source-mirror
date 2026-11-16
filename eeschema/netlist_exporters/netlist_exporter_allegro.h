@@ -216,6 +216,11 @@ private:
 
     FILE* m_f            ;    ///< File pointer for netlist file writing operation.
     wxString m_exportPath;    ///< Directory to store device files.
+#ifdef __EMSCRIPTEN__
+    /// The WebAssembly editor: WriteNetlist's reporter, where a device file failure is reported
+    /// in place of a message box.
+    REPORTER* m_reporter = nullptr;
+#endif
     std::multimap<wxString, wxString> m_packageProperties;
 
     /// Store the component group.
