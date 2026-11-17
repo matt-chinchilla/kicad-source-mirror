@@ -27,6 +27,56 @@
 #include <sch_shape.h>
 #include <macros.h>
 
+#ifdef __EMSCRIPTEN__
+#include <symbol_check_finding.h>
+
+// Where the running check also files its findings, as records for the WebAssembly editor's
+// host (null: messages only, as in every plain build).
+static std::vector<SYMBOL_CHECK_FINDING>* s_ccFindings = nullptr;
+
+static void ccSymbolFinding( const char* aCode )
+{
+    if( !s_ccFindings )
+        return;
+
+    SYMBOL_CHECK_FINDING finding;
+    finding.code = aCode;
+    s_ccFindings->push_back( std::move( finding ) );
+}
+
+static void ccPinFinding( const char* aCode, bool aInfo, const SCH_PIN* aPin )
+{
+    if( !s_ccFindings )
+        return;
+
+    SYMBOL_CHECK_FINDING finding;
+    finding.code = aCode;
+    finding.info = aInfo;
+    finding.pins.push_back( aPin->GetNumber() );
+    finding.unit = aPin->GetUnit();
+    finding.bodyStyle = aPin->GetBodyStyle();
+    finding.hasPosition = true;
+    finding.position = aPin->GetPosition();
+    finding.items.push_back( aPin->m_Uuid );
+    s_ccFindings->push_back( std::move( finding ) );
+}
+
+static void ccShapeFinding( const char* aCode, const SCH_SHAPE* aShape )
+{
+    if( !s_ccFindings )
+        return;
+
+    SYMBOL_CHECK_FINDING finding;
+    finding.code = aCode;
+    finding.unit = aShape->GetUnit();
+    finding.bodyStyle = aShape->GetBodyStyle();
+    finding.hasPosition = true;
+    finding.position = aShape->GetPosition();
+    finding.items.push_back( aShape->m_Uuid );
+    s_ccFindings->push_back( std::move( finding ) );
+}
+#endif
+
 // helper function to sort pins by pin num
 static bool sort_by_pin_number( const SCH_PIN* ref, const SCH_PIN* tst );
 
@@ -186,6 +236,22 @@ void CheckDuplicatePins( LIB_SYMBOL* aSymbol, std::vector<wxString>& aMessages, 
 
         msg += wxT( "<br><br>" );
         aMessages.push_back( msg );
+
+#ifdef __EMSCRIPTEN__
+        if( s_ccFindings )
+        {
+            SYMBOL_CHECK_FINDING finding;
+            finding.code = "duplicate_pin";
+            finding.pins.push_back( next.number );
+            finding.unit = next.pin->GetUnit();
+            finding.bodyStyle = next.pin->GetBodyStyle();
+            finding.hasPosition = true;
+            finding.position = next.pin->GetPosition();
+            finding.items.push_back( next.pin->m_Uuid );
+            finding.items.push_back( prev.pin->m_Uuid );
+            s_ccFindings->push_back( std::move( finding ) );
+        }
+#endif
     }
 }
 
@@ -221,6 +287,10 @@ void CheckLibSymbol( LIB_SYMBOL* aSymbol, std::vector<wxString>& aMessages,
     if( reference_base.IsEmpty() )
     {
         aMessages.push_back( _( "<b>Warning: reference is empty</b><br><br>" ) );
+
+#ifdef __EMSCRIPTEN__
+        ccSymbolFinding( "empty_reference" );
+#endif
     }
     else
     {
@@ -234,6 +304,10 @@ void CheckLibSymbol( LIB_SYMBOL* aSymbol, std::vector<wxString>& aMessages,
                         illegal_end );
             msg += wxT( "<br><br>" );
             aMessages.push_back( msg );
+
+#ifdef __EMSCRIPTEN__
+            ccSymbolFinding( "reference_prefix_digit" );
+#endif
         }
     }
 
@@ -260,29 +334,54 @@ void CheckLibSymbol( LIB_SYMBOL* aSymbol, std::vector<wxString>& aMessages,
         {
             msg.Printf( _( "<b>A Power Symbol should have only one unit</b><br><br>" ) );
             aMessages.push_back( msg );
+
+#ifdef __EMSCRIPTEN__
+            ccSymbolFinding( "power_units" );
+#endif
         }
 
         if( pinList.size() != 1 )
         {
             msg.Printf( _( "<b>A Power Symbol should have only one pin</b><br><br>" ) );
             aMessages.push_back( msg );
+
+#ifdef __EMSCRIPTEN__
+            ccSymbolFinding( "power_pins" );
+#endif
         }
 
+#ifdef __EMSCRIPTEN__
+        // A power symbol with no pin at all is the finding above; the lines below read the
+        // first pin, so they are skipped for it (plain builds read pinList[0] unguarded).
+        SCH_PIN* pin = pinList.empty() ? nullptr : pinList[0];
+
+        if( pin )
+#else
         SCH_PIN* pin = pinList[0];
-
-        if( pin->GetType() != ELECTRICAL_PINTYPE::PT_POWER_IN
-                && pin->GetType() != ELECTRICAL_PINTYPE::PT_POWER_OUT )
+#endif
         {
-            msg.Printf( _( "<b>Suspicious Power Symbol</b><br>"
-                           "Only an input or output power pin has meaning<br><br>" ) );
-            aMessages.push_back( msg );
-        }
+            if( pin->GetType() != ELECTRICAL_PINTYPE::PT_POWER_IN
+                    && pin->GetType() != ELECTRICAL_PINTYPE::PT_POWER_OUT )
+            {
+                msg.Printf( _( "<b>Suspicious Power Symbol</b><br>"
+                               "Only an input or output power pin has meaning<br><br>" ) );
+                aMessages.push_back( msg );
 
-        if( pin->GetType() == ELECTRICAL_PINTYPE::PT_POWER_IN && !pin->IsVisible() )
-        {
-            msg.Printf( _( "<b>Suspicious Power Symbol</b><br>"
-                           "Invisible input power pins are no longer required<br><br>" ) );
-            aMessages.push_back( msg );
+#ifdef __EMSCRIPTEN__
+                ccPinFinding( "power_pin_type", false, pin );
+#endif
+            }
+
+            if( pin->GetType() == ELECTRICAL_PINTYPE::PT_POWER_IN && !pin->IsVisible() )
+            {
+                msg.Printf( _( "<b>Suspicious Power Symbol</b><br>"
+                               "Invisible input power pins are no longer required<br><br>" ) );
+                aMessages.push_back( msg );
+
+#ifdef __EMSCRIPTEN__
+                ccPinFinding( "power_pin_hidden", false, pin );
+#endif
+            }
         }
     }
 
@@ -352,6 +451,10 @@ void CheckLibSymbol( LIB_SYMBOL* aSymbol, std::vector<wxString>& aMessages,
             msg += _( "(Hidden power pins will drive their pin names on to any connected nets.)" );
             msg += wxT( "<br><br>" );
             aMessages.push_back( msg );
+
+#ifdef __EMSCRIPTEN__
+            ccPinFinding( "hidden_power_pin", true, pin );
+#endif
         }
 
         if( ( (pin->GetPosition().x % clamped_grid_size) != 0 )
@@ -408,6 +511,10 @@ void CheckLibSymbol( LIB_SYMBOL* aSymbol, std::vector<wxString>& aMessages,
 
             msg += wxT( "<br><br>" );
             aMessages.push_back( msg );
+
+#ifdef __EMSCRIPTEN__
+            ccPinFinding( "off_grid_pin", false, pin );
+#endif
         }
     }
 
@@ -444,6 +551,10 @@ void CheckLibSymbolGraphics( LIB_SYMBOL* aSymbol, std::vector<wxString>& aMessag
                             aUnitsProvider->MessageTextFromValue( -shape->GetPosition().y ) );
                 msg += wxT( "<br>" );
                 aMessages.push_back( msg );
+
+#ifdef __EMSCRIPTEN__
+                ccShapeFinding( "circle_zero_radius", shape );
+#endif
             }
             break;
 
@@ -455,6 +566,10 @@ void CheckLibSymbolGraphics( LIB_SYMBOL* aSymbol, std::vector<wxString>& aMessag
                             aUnitsProvider->MessageTextFromValue( -shape->GetPosition().y ) );
                 msg += wxT( "<br>" );
                 aMessages.push_back( msg );
+
+#ifdef __EMSCRIPTEN__
+                ccShapeFinding( "rectangle_zero_size", shape );
+#endif
             }
             break;
 
@@ -486,3 +601,46 @@ bool sort_by_pin_number( const SCH_PIN* ref, const SCH_PIN* tst )
 
     return test < 0;
 }
+
+
+#ifdef __EMSCRIPTEN__
+void CheckLibSymbol( LIB_SYMBOL* aSymbol, std::vector<wxString>& aMessages, int aGridForPins,
+                     UNITS_PROVIDER* aUnitsProvider, std::vector<SYMBOL_CHECK_FINDING>* aFindings )
+{
+    std::vector<SYMBOL_CHECK_FINDING>* before = s_ccFindings;
+    s_ccFindings = aFindings;
+
+    try
+    {
+        CheckLibSymbol( aSymbol, aMessages, aGridForPins, aUnitsProvider );
+    }
+    catch( ... )
+    {
+        s_ccFindings = before;
+        throw;
+    }
+
+    s_ccFindings = before;
+}
+
+
+void CheckDuplicatePins( LIB_SYMBOL* aSymbol, std::vector<wxString>& aMessages,
+                         UNITS_PROVIDER* aUnitsProvider,
+                         std::vector<SYMBOL_CHECK_FINDING>* aFindings )
+{
+    std::vector<SYMBOL_CHECK_FINDING>* before = s_ccFindings;
+    s_ccFindings = aFindings;
+
+    try
+    {
+        CheckDuplicatePins( aSymbol, aMessages, aUnitsProvider );
+    }
+    catch( ... )
+    {
+        s_ccFindings = before;
+        throw;
+    }
+
+    s_ccFindings = before;
+}
+#endif

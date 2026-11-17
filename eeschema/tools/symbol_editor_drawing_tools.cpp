@@ -42,6 +42,10 @@
 #include <wx/msgdlg.h>
 #include <import_gfx/dialog_import_gfx_sch.h>
 
+#ifdef __EMSCRIPTEN__
+#include <tools/symbol_editor_host.h>
+#endif
+
 
 KIID SYMBOL_EDITOR_DRAWING_TOOLS::g_lastPin;
 
@@ -242,6 +246,18 @@ int SYMBOL_EDITOR_DRAWING_TOOLS::TwoClickPlace( const TOOL_EVENT& aEvent )
                     }
 
                     text->SetTextAngle( m_lastTextAngle );
+
+#ifdef __EMSCRIPTEN__
+                    // The WebAssembly editor's host edits a new text in its own window
+                    // (ev.symedit, isNew): taken, the text is placed reading "Text" until
+                    // the reader types its own.
+                    if( CcAskHostSymEdit( "text", &text->m_Uuid, true ) )
+                    {
+                        text->SetText( wxS( "Text" ) );
+                        item = text;
+                        break;
+                    }
+#endif
 
                     DIALOG_TEXT_PROPERTIES dlg( m_frame, text );
 
@@ -550,14 +566,22 @@ int SYMBOL_EDITOR_DRAWING_TOOLS::doDrawShape( const TOOL_EVENT& aEvent, std::opt
 
                 if( isTextBox )
                 {
-                    SCH_TEXTBOX*           textbox = static_cast<SCH_TEXTBOX*>( item );
-                    DIALOG_TEXT_PROPERTIES dlg( m_frame, static_cast<SCH_TEXTBOX*>( item ) );
+                    SCH_TEXTBOX* textbox = static_cast<SCH_TEXTBOX*>( item );
 
-                    // QuasiModal required for syntax help and Scintilla auto-complete
-                    if( dlg.ShowQuasiModal() != wxID_OK )
+#ifdef __EMSCRIPTEN__
+                    // The WebAssembly editor's host edits a new text box in its own window
+                    // (ev.symedit, isNew): taken, the box is added as drawn and no dialog opens.
+                    if( !CcAskHostSymEdit( "textbox", &item->m_Uuid, true ) )
+#endif
                     {
-                        cleanup();
-                        continue;
+                        DIALOG_TEXT_PROPERTIES dlg( m_frame, textbox );
+
+                        // QuasiModal required for syntax help and Scintilla auto-complete
+                        if( dlg.ShowQuasiModal() != wxID_OK )
+                        {
+                            cleanup();
+                            continue;
+                        }
                     }
 
                     m_lastTextBold = textbox->IsBold();
