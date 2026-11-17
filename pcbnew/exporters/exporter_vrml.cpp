@@ -52,7 +52,10 @@
 
 #include <exporter_vrml.h>
 
-#ifndef __EMSCRIPTEN__
+// The WebAssembly image that links the 3D viewer links the 3D model cache and scene graph this
+// exporter writes through, so it carries the real exporter (KICAD_WASM_VRML_EXPORT, set in
+// pcbnew/CMakeLists.txt); an image without them keeps the stubs below.
+#if !defined( __EMSCRIPTEN__ ) || defined( KICAD_WASM_VRML_EXPORT )
 
 EXPORTER_VRML::EXPORTER_VRML( BOARD* aBoard )
 {
@@ -1597,9 +1600,9 @@ void EXPORTER_PCB_VRML::create_vrml_shell( IFSG_TRANSFORM& PcbOutput, VRML_COLOR
     }
 }
 
-#else  // __EMSCRIPTEN__
+#else  // __EMSCRIPTEN__ without KICAD_WASM_VRML_EXPORT
 
-// VRML export is not supported in WASM builds - stub implementations
+// VRML export is not supported in WASM builds without the 3D viewer - stub implementations
 
 #include "pcb_edit_frame.h"
 
@@ -1657,4 +1660,4 @@ bool PCB_EDIT_FRAME::ExportVRML_File( const wxString& aFullFileName, double aMMt
     return false;
 }
 
-#endif  // __EMSCRIPTEN__
+#endif  // !__EMSCRIPTEN__ || KICAD_WASM_VRML_EXPORT

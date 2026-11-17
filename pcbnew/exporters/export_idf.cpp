@@ -37,6 +37,7 @@
 #include <build_version.h>
 #include <project_pcb.h>
 #include <wx/msgdlg.h>
+#include <reporter.h>
 #include "project.h"
 #include "kiway.h"
 #include "3d_cache/3d_cache.h"
@@ -603,9 +604,27 @@ static void idf_export_footprint( BOARD* aPcb, FOOTPRINT* aFootprint, IDF3_BOARD
  */
 bool PCB_EDIT_FRAME::Export_IDF3( BOARD* aPcb, const wxString& aFullFileName,
                                   bool aUseThou, double aXRef, double aYRef,
-                                  bool aIncludeUnspecified, bool aIncludeDNP )
+                                  bool aIncludeUnspecified, bool aIncludeDNP,
+                                  REPORTER* aReporter )
 {
     IDF3_BOARD idfBoard( IDF3::CAD_ELEC );
+
+    // The WebAssembly editor runs this export with no KiCad window: a failure goes to its
+    // reporter as an error line in place of a message box. Elsewhere the box shows as before.
+    auto reportFailure =
+            [&]( const wxString& aMsg )
+            {
+#ifdef __EMSCRIPTEN__
+                if( aReporter )
+                {
+                    aReporter->Report( aMsg, RPT_SEVERITY_ERROR );
+                    return;
+                }
+#else
+                (void) aReporter;
+#endif
+                wxMessageBox( aMsg );
+            };
 
     // Switch the locale to standard C (needed to print floating point numbers)
     LOCALE_IO toggle;
@@ -655,7 +674,7 @@ bool PCB_EDIT_FRAME::Export_IDF3( BOARD* aPcb, const wxString& aFullFileName,
         {
             wxString msg;
             msg << _( "IDF Export Failed:\n" ) << From_UTF8( idfBoard.GetError().c_str() );
-            wxMessageBox( msg );
+            reportFailure( msg );
 
             ok = false;
         }
@@ -664,7 +683,7 @@ bool PCB_EDIT_FRAME::Export_IDF3( BOARD* aPcb, const wxString& aFullFileName,
     {
         wxString msg;
         msg << _( "IDF Export Failed:\n" ) << ioe.What();
-        wxMessageBox( msg );
+        reportFailure( msg );
 
         ok = false;
     }
@@ -672,7 +691,7 @@ bool PCB_EDIT_FRAME::Export_IDF3( BOARD* aPcb, const wxString& aFullFileName,
     {
         wxString msg;
         msg << _( "IDF Export Failed:\n" ) << From_UTF8( e.what() );
-        wxMessageBox( msg );
+        reportFailure( msg );
         ok = false;
     }
 

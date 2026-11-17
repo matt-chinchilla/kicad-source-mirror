@@ -500,11 +500,14 @@ public:
      * @param aYRef the board Reference Point in mm, Y value.
      * @param aIncludeUnspecified true to include unspecified-type footprint models
      * @param aIncludeDNP true to include DNP footprint models
+     * @param aReporter in the WebAssembly editor, where a failure is reported instead of a
+     *                  message box; ignored elsewhere
      * @return true if OK.
      */
     bool Export_IDF3( BOARD* aPcb, const wxString& aFullFileName,
                       bool aUseThou, double aXRef, double aYRef,
-                      bool aIncludeUnspecified, bool aIncludeDNP );
+                      bool aIncludeUnspecified, bool aIncludeDNP,
+                      REPORTER* aReporter = nullptr );
 
     /**
      * Export the current BOARD to a STEP assembly.

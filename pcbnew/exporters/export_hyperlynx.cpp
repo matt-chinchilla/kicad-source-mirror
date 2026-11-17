@@ -46,6 +46,7 @@
 #include <string_utils.h>
 #include <tools/board_editor_control.h>
 #include <exporters/board_exporter_base.h>
+#include <exporters/export_hyperlynx.h>
 #include <board_stackup_manager/stackup_predefined_prms.h>
 
 
@@ -713,3 +714,14 @@ int BOARD_EDITOR_CONTROL::ExportHyperlynx( const TOOL_EVENT& aEvent )
 
     return 0;
 }
+
+
+#ifdef __EMSCRIPTEN__
+bool ExportBoardToHyperlynx( BOARD* aBoard, const wxFileName& aPath )
+{
+    HYPERLYNX_EXPORTER exporter;
+    exporter.SetBoard( aBoard );
+    exporter.SetOutputFilename( aPath );
+    return exporter.Run();
+}
+#endif
