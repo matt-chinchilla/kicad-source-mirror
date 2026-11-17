@@ -38,6 +38,17 @@ class TOOL_BASE;
 class TOOL_MANAGER;
 class TOOL_ACTION;
 
+#ifdef __EMSCRIPTEN__
+/**
+ * The in-browser editor's host may hold an action for a window of its own: asks
+ * window.kicadHostAction.onRequest({ action: aActionName }) and answers true when the
+ * host took it (the caller then does not run the action). No listener, a falsy answer
+ * or a throwing listener answers false. One body for every caller (common/tool/
+ * action_manager.cpp): RunHotKey for keys, a tool for its own menu and toolbar doors.
+ */
+bool hostHoldsAction( const std::string& aActionName );
+#endif
+
 /**
  * Functors that can be used to figure out how the action controls should be displayed in the UI
  * and if an action should be enabled given the current selection.

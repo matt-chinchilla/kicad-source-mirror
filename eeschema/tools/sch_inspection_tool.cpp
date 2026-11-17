@@ -35,6 +35,7 @@
 #include <tool/conditional_menu.h>
 #include <tool/selection_conditions.h>
 #include <tools/sch_actions.h>
+#include <tool/action_manager.h>
 #include <tools/sch_selection_tool.h>
 #include <tools/sch_selection.h>
 #include <sim/simulator_frame.h>
@@ -453,6 +454,15 @@ SYMBOL_DIFF_WIDGET* SCH_INSPECTION_TOOL::constructDiffPanel( wxPanel* aParentPan
 
 int SCH_INSPECTION_TOOL::RunSimulation( const TOOL_EVENT& aEvent )
 {
+#ifdef __EMSCRIPTEN__
+    // The in-browser editor's host runs the simulator in a page of its own: asked before
+    // the Simulator frame is made, so Inspect > Simulator, the toolbar button and the key
+    // all stop here when the host takes the action, and KiCad's window (with its probe and
+    // tune tools) never opens.
+    if( hostHoldsAction( SCH_ACTIONS::showSimulator.GetName() ) )
+        return 0;
+#endif
+
     SIMULATOR_FRAME* simFrame = (SIMULATOR_FRAME*) m_frame->Kiway().Player( FRAME_SIMULATOR, true );
 
     if( !simFrame )
