@@ -19,6 +19,11 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: in the WebAssembly build the tuning profile
+ * solve (calculateTrackParametersForCell and its calculators) is lifted into the free function
+ * ccTuningSolve, which the panel calls, so the engine can answer a width, gap or delay with no
+ * panel shown.
  */
 
 
@@ -34,6 +39,532 @@
 #include <widgets/grid_text_button_helpers.h>
 #include <widgets/paged_dialog.h>
 #include <widgets/wx_grid.h>
+
+#ifdef __EMSCRIPTEN__
+// Engine run 15 (K-TSOLVE): the tuning profile panel's solve lifted out of the panel into a free
+// function, so the engine can answer a width, a pair gap or a delay from a target impedance and
+// the board's stackup with no panel. The bodies below are calculateTrackParametersForCell and
+// the four calculate* members with their board parameter readers, taking the row's facts as
+// arguments in place of the grid's cells; the panel calls this function (see
+// calculateTrackParametersForCell) so there is one solve.
+
+namespace
+{
+constexpr double CC_TSOLVE_RHO = 1.72e-8;
+
+double ccTsSkinDepth( const double aFreq, const double aMurc, const double aSigma )
+{
+    return 1.0 / sqrt( M_PI * aFreq * aMurc * TRANSLINE_CALCULATIONS::MU0 * aSigma );
+}
+
+
+int ccTsStackupLayerId( const std::vector<BOARD_STACKUP_ITEM*>& aLayerList, PCB_LAYER_ID aPcbLayerId )
+{
+    for( int i = 0; i < static_cast<int>( aLayerList.size() ); ++i )
+    {
+        if( aLayerList.at( i )->GetBrdLayerId() == aPcbLayerId )
+            return i;
+    }
+
+    return -1;
+}
+
+
+struct CC_TS_DIELECTRIC
+{
+    double Height = 0.0;
+    double E_r = 0.0;
+    double Loss_Tangent = 0.0;
+};
+
+
+CC_TS_DIELECTRIC ccTsAverageDielectric( const std::vector<BOARD_STACKUP_ITEM*>& aStackupLayerList,
+                                        const std::vector<int>& aDielectricLayerStackupIds,
+                                        const EDA_IU_SCALE& aIuScale )
+{
+    double totalHeight = 0.0;
+    double e_r = 0.0;
+    double lossTangent = 0.0;
+
+    for( int i : aDielectricLayerStackupIds )
+    {
+        const BOARD_STACKUP_ITEM* layer = aStackupLayerList.at( i );
+
+        for( int subLayerIdx = 0; subLayerIdx < layer->GetSublayersCount(); ++subLayerIdx )
+        {
+            totalHeight += aIuScale.IUTomm( layer->GetThickness( subLayerIdx ) );
+            e_r += layer->GetEpsilonR( subLayerIdx ) * aIuScale.IUTomm( layer->GetThickness( subLayerIdx ) );
+            lossTangent += layer->GetLossTangent( subLayerIdx )
+                           * aIuScale.IUTomm( layer->GetThickness( subLayerIdx ) );
+        }
+    }
+
+    e_r = e_r / totalHeight;
+    lossTangent = lossTangent / totalHeight;
+    totalHeight /= 1000.0; // Convert from mm to m
+
+    return { totalHeight, e_r, lossTangent };
+}
+
+
+void ccTsDielectricLayers( const std::vector<BOARD_STACKUP_ITEM*>& aStackupLayerList, const int aSignalLayerId,
+                           const int aReferenceLayerId, std::vector<int>& aDielectricLayerStackupIds )
+{
+    for( int i = std::min( aSignalLayerId, aReferenceLayerId ) + 1; i < std::max( aSignalLayerId, aReferenceLayerId );
+         ++i )
+    {
+        const BOARD_STACKUP_ITEM* layer = aStackupLayerList.at( i );
+
+        if( layer->GetType() != BS_ITEM_TYPE_DIELECTRIC )
+            continue;
+
+        if( !layer->HasEpsilonRValue() )
+            continue;
+
+        aDielectricLayerStackupIds.push_back( i );
+    }
+}
+
+
+struct CC_TS_BOARD
+{
+    double DielectricConstant = 0.0;
+    double TopDielectricLayerThickness = 0.0;
+    double BottomDielectricLayerThickness = 0.0;
+    double SignalLayerThickness = 0.0;
+    double LossTangent = 0.0;
+};
+
+
+/// getMicrostripBoardParameters and getStriplineBoardParameters: false with aProblem set.
+bool ccTsBoardParameters( BOARD* aBoard, bool aMicrostrip, PCB_LAYER_ID aSignal, PCB_LAYER_ID aTopRef,
+                          PCB_LAYER_ID aBottomRef, const EDA_IU_SCALE& aScale, CC_TS_BOARD& aOut,
+                          wxString& aProblem )
+{
+    BOARD_STACKUP                           stackup = aBoard->GetStackupOrDefault();
+    const std::vector<BOARD_STACKUP_ITEM*>& stackupLayerList = stackup.GetList();
+
+    if( aMicrostrip && aSignal != F_Cu && aSignal != B_Cu )
+    {
+        aProblem = _( "Internal error: Microstrip can only be on an outer copper layer" );
+        return false;
+    }
+
+    const int signalLayerStackupId = ccTsStackupLayerId( stackupLayerList, aSignal );
+
+    if( signalLayerStackupId == -1 )
+    {
+        aProblem = _( "Signal layer not found in stackup" );
+        return false;
+    }
+
+    const double signalLayerThickness =
+            aScale.IUTomm( stackupLayerList.at( signalLayerStackupId )->GetThickness() ) / 1000.0;
+
+    if( signalLayerThickness <= 0 )
+    {
+        aProblem = _( "Signal layer thickness must be greater than 0" );
+        return false;
+    }
+
+    if( aMicrostrip )
+    {
+        const PCB_LAYER_ID referenceLayer = aSignal == F_Cu ? aBottomRef : aTopRef;
+
+        if( referenceLayer == UNDEFINED_LAYER )
+        {
+            aProblem = _( "Reference layer not found in stackup" );
+            return false;
+        }
+
+        const int referenceLayerStackupId = ccTsStackupLayerId( stackupLayerList, referenceLayer );
+
+        if( signalLayerStackupId == referenceLayerStackupId )
+        {
+            aProblem = _( "Reference layer must be different to signal layer" );
+            return false;
+        }
+
+        std::vector<int> dielectricLayerStackupIds;
+        ccTsDielectricLayers( stackupLayerList, signalLayerStackupId, referenceLayerStackupId,
+                              dielectricLayerStackupIds );
+
+        const CC_TS_DIELECTRIC dielectricInfo =
+                ccTsAverageDielectric( stackupLayerList, dielectricLayerStackupIds, aScale );
+
+        if( dielectricInfo.Height <= 0.0 )
+        {
+            aProblem = _( "Dielectric height must be greater than 0" );
+            return false;
+        }
+
+        aOut = CC_TS_BOARD{ dielectricInfo.E_r, dielectricInfo.Height, 0.0, signalLayerThickness,
+                            dielectricInfo.Loss_Tangent };
+        return true;
+    }
+
+    if( aTopRef == UNDEFINED_LAYER )
+    {
+        aProblem = _( "Top reference layer not found in stackup" );
+        return false;
+    }
+
+    const int topReferenceLayerStackupId = ccTsStackupLayerId( stackupLayerList, aTopRef );
+
+    if( !IsCopperLayerLowerThan( aSignal, aTopRef ) )
+    {
+        aProblem = _( "Top reference layer must be above signal layer in board stackup" );
+        return false;
+    }
+
+    if( aBottomRef == UNDEFINED_LAYER )
+    {
+        aProblem = _( "Bottom reference layer not found in stackup" );
+        return false;
+    }
+
+    const int bottomReferenceLayerStackupId = ccTsStackupLayerId( stackupLayerList, aBottomRef );
+
+    if( !IsCopperLayerLowerThan( aBottomRef, aSignal ) )
+    {
+        aProblem = _( "Bottom reference layer must be below signal layer in board stackup" );
+        return false;
+    }
+
+    std::vector<int> topDielectricLayerStackupIds, bottomDielectricLayerStackupIds;
+
+    ccTsDielectricLayers( stackupLayerList, signalLayerStackupId, topReferenceLayerStackupId,
+                          topDielectricLayerStackupIds );
+    ccTsDielectricLayers( stackupLayerList, signalLayerStackupId, bottomReferenceLayerStackupId,
+                          bottomDielectricLayerStackupIds );
+
+    std::vector<int> allDielectricLayerStackupIds( topDielectricLayerStackupIds );
+    allDielectricLayerStackupIds.insert( allDielectricLayerStackupIds.end(), bottomDielectricLayerStackupIds.begin(),
+                                         bottomDielectricLayerStackupIds.end() );
+
+    const CC_TS_DIELECTRIC topDielectricInfo =
+            ccTsAverageDielectric( stackupLayerList, topDielectricLayerStackupIds, aScale );
+    const CC_TS_DIELECTRIC bottomDielectricInfo =
+            ccTsAverageDielectric( stackupLayerList, bottomDielectricLayerStackupIds, aScale );
+    const CC_TS_DIELECTRIC allDielectricInfo =
+            ccTsAverageDielectric( stackupLayerList, allDielectricLayerStackupIds, aScale );
+
+    if( topDielectricInfo.Height <= 0.0 && bottomDielectricInfo.Height <= 0.0 )
+    {
+        aProblem = _( "Dielectric heights must be greater than 0" );
+        return false;
+    }
+
+    aOut = CC_TS_BOARD{ allDielectricInfo.E_r, topDielectricInfo.Height, bottomDielectricInfo.Height,
+                        signalLayerThickness, allDielectricInfo.Loss_Tangent };
+    return true;
+}
+} // namespace
+
+
+/**
+ * KiCad's tuning profile solve for one row, with no panel: a width (aSolveFor 0), a pair gap
+ * (1) or a delay (2) for a single track or a differential pair on aSignal, from aImpedance
+ * (ohms, a pair's differential impedance) and the board's stackup between aSignal and its
+ * reference layers (a microstrip on F.Cu reads aBottomRef, on B.Cu aTopRef; a stripline
+ * both). aWidth and aGap carry the row's given values in (IU, 0 when empty) and the answer
+ * out; aDelay is the answer's propagation delay in IU of KiCad's ps/cm unit. False with
+ * aProblem set (KiCad's own message) when the panel would show an error.
+ */
+bool ccTuningSolve( BOARD* aBoard, const EDA_IU_SCALE& aIuScale, bool aDifferential, double aImpedance,
+                    PCB_LAYER_ID aSignal, PCB_LAYER_ID aTopRef, PCB_LAYER_ID aBottomRef, int aSolveFor,
+                    int& aWidth, int& aGap, int& aDelay, wxString& aProblem )
+{
+    const EDA_IU_SCALE& iuScale = aIuScale;
+    const bool          isMicrostrip = IsFrontLayer( aSignal ) || IsBackLayer( aSignal );
+    const double        targetZ = aImpedance;
+
+    if( !aBoard || aSolveFor < 0 || aSolveFor > 2 )
+        return false;
+
+    if( targetZ <= 0 )
+    {
+        aProblem = _( "Target impedance must be greater than 0" );
+        return false;
+    }
+
+    CC_TS_BOARD boardParameters;
+
+    if( !ccTsBoardParameters( aBoard, isMicrostrip, aSignal, aTopRef, aBottomRef, iuScale, boardParameters,
+                              aProblem ) )
+    {
+        return false;
+    }
+
+    using RESULTS = std::unordered_map<TRANSLINE_PARAMETERS, std::pair<double, TRANSLINE_STATUS>>;
+
+    int calculatedWidth = 0;
+    int calculatedGap = 0;
+    int calculatedDelay = 0;
+
+    if( aDifferential )
+    {
+        double width = 0.0;
+        double gap = 0.0;
+
+        if( aSolveFor == 0 )
+        {
+            if( aGap <= 0 )
+            {
+                aProblem = _( "Diff pair gap must be greater than 0 to calculate width" );
+                return false;
+            }
+
+            gap = iuScale.IUTomm( aGap ) / 1000.0;
+        }
+        else if( aSolveFor == 1 )
+        {
+            if( aWidth <= 0 )
+            {
+                aProblem = _( "Width must be greater than 0 to calculate diff pair gap" );
+                return false;
+            }
+
+            width = iuScale.IUTomm( aWidth ) / 1000.0;
+        }
+        else
+        {
+            if( aWidth <= 0 || aGap <= 0 )
+            {
+                aProblem = _( "Width and diff pair gap must be greater than 0 to calculate delay" );
+                return false;
+            }
+
+            width = iuScale.IUTomm( aWidth ) / 1000.0;
+            gap = iuScale.IUTomm( aGap ) / 1000.0;
+        }
+
+        COUPLED_MICROSTRIP coupledMicrostripCalc;
+        COUPLED_STRIPLINE  coupledStriplineCalc;
+        RESULTS*           resultsPtr = nullptr;
+
+        if( isMicrostrip )
+        {
+            coupledMicrostripCalc.SetParameter( TRANSLINE_PARAMETERS::Z0_E, targetZ / 2.0 );
+            coupledMicrostripCalc.SetParameter( TRANSLINE_PARAMETERS::Z0_O, targetZ / 2.0 );
+            coupledMicrostripCalc.SetParameter( TRANSLINE_PARAMETERS::Z_DIFF, targetZ );
+            coupledMicrostripCalc.SetParameter( TRANSLINE_PARAMETERS::PHYS_WIDTH, width );
+            coupledMicrostripCalc.SetParameter( TRANSLINE_PARAMETERS::PHYS_S, gap );
+            coupledMicrostripCalc.SetParameter( TRANSLINE_PARAMETERS::EPSILONR, boardParameters.DielectricConstant );
+            coupledMicrostripCalc.SetParameter( TRANSLINE_PARAMETERS::PHYS_LEN, 10 );
+            coupledMicrostripCalc.SetParameter( TRANSLINE_PARAMETERS::H, boardParameters.TopDielectricLayerThickness );
+            coupledMicrostripCalc.SetParameter( TRANSLINE_PARAMETERS::T, boardParameters.SignalLayerThickness );
+            coupledMicrostripCalc.SetParameter( TRANSLINE_PARAMETERS::H_T, 1e+20 );
+            coupledMicrostripCalc.SetParameter( TRANSLINE_PARAMETERS::FREQUENCY, 1000000000.0 );
+            coupledMicrostripCalc.SetParameter( TRANSLINE_PARAMETERS::MURC, 1 );
+            coupledMicrostripCalc.SetParameter( TRANSLINE_PARAMETERS::SKIN_DEPTH,
+                                                ccTsSkinDepth( 1.0, 1.0, 1.0 / CC_TSOLVE_RHO ) );
+            coupledMicrostripCalc.SetParameter( TRANSLINE_PARAMETERS::SIGMA, 1.0 / CC_TSOLVE_RHO );
+            coupledMicrostripCalc.SetParameter( TRANSLINE_PARAMETERS::ROUGH, 0 );
+            coupledMicrostripCalc.SetParameter( TRANSLINE_PARAMETERS::TAND, boardParameters.LossTangent );
+            coupledMicrostripCalc.SetParameter( TRANSLINE_PARAMETERS::ANG_L, 1 );
+
+            switch( aSolveFor )
+            {
+            case 0: coupledMicrostripCalc.Synthesize( SYNTHESIZE_OPTS::FIX_SPACING ); break;
+            case 1: coupledMicrostripCalc.Synthesize( SYNTHESIZE_OPTS::FIX_WIDTH ); break;
+            default: coupledMicrostripCalc.Analyse(); break;
+            }
+
+            resultsPtr = aSolveFor == 2 ? &coupledMicrostripCalc.GetAnalysisResults()
+                                        : &coupledMicrostripCalc.GetSynthesisResults();
+        }
+        else
+        {
+            coupledStriplineCalc.SetParameter( TRANSLINE_PARAMETERS::Z0_E, targetZ / 2.0 );
+            coupledStriplineCalc.SetParameter( TRANSLINE_PARAMETERS::Z0_O, targetZ / 2.0 );
+            coupledStriplineCalc.SetParameter( TRANSLINE_PARAMETERS::Z_DIFF, targetZ );
+            coupledStriplineCalc.SetParameter( TRANSLINE_PARAMETERS::PHYS_WIDTH, width );
+            coupledStriplineCalc.SetParameter( TRANSLINE_PARAMETERS::PHYS_S, gap );
+            coupledStriplineCalc.SetParameter( TRANSLINE_PARAMETERS::T, boardParameters.SignalLayerThickness );
+            coupledStriplineCalc.SetParameter( TRANSLINE_PARAMETERS::H,
+                                               boardParameters.TopDielectricLayerThickness
+                                                       + boardParameters.SignalLayerThickness
+                                                       + boardParameters.BottomDielectricLayerThickness );
+            coupledStriplineCalc.SetParameter( TRANSLINE_PARAMETERS::EPSILONR, boardParameters.DielectricConstant );
+            coupledStriplineCalc.SetParameter( TRANSLINE_PARAMETERS::SKIN_DEPTH,
+                                               ccTsSkinDepth( 1.0, 1.0, 1.0 / CC_TSOLVE_RHO ) );
+            coupledStriplineCalc.SetParameter( TRANSLINE_PARAMETERS::PHYS_LEN, 1.0 );
+            coupledStriplineCalc.SetParameter( TRANSLINE_PARAMETERS::FREQUENCY, 1000000000.0 );
+            coupledStriplineCalc.SetParameter( TRANSLINE_PARAMETERS::ANG_L, 1.0 );
+            coupledStriplineCalc.SetParameter( TRANSLINE_PARAMETERS::SIGMA, 1.0 / CC_TSOLVE_RHO );
+            coupledStriplineCalc.SetParameter( TRANSLINE_PARAMETERS::MURC, 1 );
+
+            switch( aSolveFor )
+            {
+            case 0: coupledStriplineCalc.Synthesize( SYNTHESIZE_OPTS::FIX_SPACING ); break;
+            case 1: coupledStriplineCalc.Synthesize( SYNTHESIZE_OPTS::FIX_WIDTH ); break;
+            default: coupledStriplineCalc.Analyse(); break;
+            }
+
+            resultsPtr = aSolveFor == 2 ? &coupledStriplineCalc.GetAnalysisResults()
+                                        : &coupledStriplineCalc.GetSynthesisResults();
+        }
+
+        RESULTS& results = *resultsPtr;
+
+        if( results[TRANSLINE_PARAMETERS::PHYS_WIDTH].second != TRANSLINE_STATUS::OK )
+        {
+            aProblem = _( "Width calculation failed" );
+            return false;
+        }
+
+        if( results[TRANSLINE_PARAMETERS::PHYS_S].second != TRANSLINE_STATUS::OK )
+        {
+            aProblem = _( "Diff pair gap calculation failed" );
+            return false;
+        }
+
+        if( results[TRANSLINE_PARAMETERS::UNIT_PROP_DELAY_ODD].second != TRANSLINE_STATUS::OK )
+        {
+            aProblem = _( "Delay calculation failed" );
+            return false;
+        }
+
+        calculatedWidth = static_cast<int>( EDA_UNIT_UTILS::UI::FromUserUnit(
+                iuScale, EDA_UNITS::MM, results[TRANSLINE_PARAMETERS::PHYS_WIDTH].first * 1000.0 ) );
+        calculatedGap = static_cast<int>( EDA_UNIT_UTILS::UI::FromUserUnit(
+                iuScale, EDA_UNITS::MM, results[TRANSLINE_PARAMETERS::PHYS_S].first * 1000.0 ) );
+        calculatedDelay = static_cast<int>( EDA_UNIT_UTILS::UI::FromUserUnit(
+                iuScale, EDA_UNITS::PS_PER_CM, results[TRANSLINE_PARAMETERS::UNIT_PROP_DELAY_ODD].first ) );
+
+        if( calculatedWidth <= 0 )
+        {
+            aProblem = _( "Could not compute track width" );
+            return false;
+        }
+        else if( calculatedGap <= 0 )
+        {
+            aProblem = _( "Could not compute differential pair gap" );
+            return false;
+        }
+        else if( calculatedDelay <= 0 )
+        {
+            aProblem = _( "Could not compute track propagation delay" );
+            return false;
+        }
+
+        if( aSolveFor == 0 )
+            aWidth = calculatedWidth;
+        else if( aSolveFor == 1 )
+            aGap = calculatedGap;
+
+        aDelay = calculatedDelay;
+        return true;
+    }
+
+    // Single track mode: a single track has no gap to solve (the panel never asks it)
+    if( aSolveFor == 1 )
+        return false;
+
+    MICROSTRIP microstripCalc;
+    STRIPLINE  striplineCalc;
+    RESULTS*   resultsPtr = nullptr;
+    const bool solveWidth = aSolveFor != 2;
+
+    if( isMicrostrip )
+    {
+        if( solveWidth )
+            microstripCalc.SetParameter( TRANSLINE_PARAMETERS::PHYS_WIDTH, 0.001 );
+        else
+            microstripCalc.SetParameter( TRANSLINE_PARAMETERS::PHYS_WIDTH, iuScale.IUTomm( aWidth ) / 1000.0 );
+
+        microstripCalc.SetParameter( TRANSLINE_PARAMETERS::SIGMA, 1.0 / CC_TSOLVE_RHO );
+        microstripCalc.SetParameter( TRANSLINE_PARAMETERS::EPSILON_EFF, 1.0 );
+        microstripCalc.SetParameter( TRANSLINE_PARAMETERS::SKIN_DEPTH, ccTsSkinDepth( 1.0, 1.0, 1.0 / CC_TSOLVE_RHO ) );
+        microstripCalc.SetParameter( TRANSLINE_PARAMETERS::EPSILONR, boardParameters.DielectricConstant );
+        microstripCalc.SetParameter( TRANSLINE_PARAMETERS::H_T, 1e+20 );
+        microstripCalc.SetParameter( TRANSLINE_PARAMETERS::H, boardParameters.TopDielectricLayerThickness );
+        microstripCalc.SetParameter( TRANSLINE_PARAMETERS::T, boardParameters.SignalLayerThickness );
+        microstripCalc.SetParameter( TRANSLINE_PARAMETERS::Z0, targetZ );
+        microstripCalc.SetParameter( TRANSLINE_PARAMETERS::FREQUENCY, 1000000000.0 );
+        microstripCalc.SetParameter( TRANSLINE_PARAMETERS::ROUGH, 0 );
+        microstripCalc.SetParameter( TRANSLINE_PARAMETERS::TAND, boardParameters.LossTangent );
+        microstripCalc.SetParameter( TRANSLINE_PARAMETERS::PHYS_LEN, 10 );
+        microstripCalc.SetParameter( TRANSLINE_PARAMETERS::MUR, 1 );
+        microstripCalc.SetParameter( TRANSLINE_PARAMETERS::MURC, 1 );
+        microstripCalc.SetParameter( TRANSLINE_PARAMETERS::ANG_L, 1 );
+
+        if( solveWidth )
+            microstripCalc.Synthesize( SYNTHESIZE_OPTS::DEFAULT );
+        else
+            microstripCalc.Analyse();
+
+        resultsPtr = solveWidth ? &microstripCalc.GetSynthesisResults() : &microstripCalc.GetAnalysisResults();
+    }
+    else
+    {
+        if( solveWidth )
+            striplineCalc.SetParameter( TRANSLINE_PARAMETERS::PHYS_WIDTH, 0.001 );
+        else
+            striplineCalc.SetParameter( TRANSLINE_PARAMETERS::PHYS_WIDTH, iuScale.IUTomm( aWidth ) / 1000.0 );
+
+        striplineCalc.SetParameter( TRANSLINE_PARAMETERS::SKIN_DEPTH, ccTsSkinDepth( 1.0, 1.0, 1.0 / CC_TSOLVE_RHO ) );
+        striplineCalc.SetParameter( TRANSLINE_PARAMETERS::EPSILONR, boardParameters.DielectricConstant );
+        striplineCalc.SetParameter( TRANSLINE_PARAMETERS::T, boardParameters.SignalLayerThickness );
+        striplineCalc.SetParameter( TRANSLINE_PARAMETERS::STRIPLINE_A, boardParameters.TopDielectricLayerThickness );
+        striplineCalc.SetParameter( TRANSLINE_PARAMETERS::H, boardParameters.TopDielectricLayerThickness
+                                                                     + boardParameters.SignalLayerThickness
+                                                                     + boardParameters.BottomDielectricLayerThickness );
+        striplineCalc.SetParameter( TRANSLINE_PARAMETERS::Z0, targetZ );
+        striplineCalc.SetParameter( TRANSLINE_PARAMETERS::PHYS_LEN, 1.0 );
+        striplineCalc.SetParameter( TRANSLINE_PARAMETERS::FREQUENCY, 1000000000.0 );
+        striplineCalc.SetParameter( TRANSLINE_PARAMETERS::TAND, boardParameters.LossTangent );
+        striplineCalc.SetParameter( TRANSLINE_PARAMETERS::ANG_L, 1.0 );
+        striplineCalc.SetParameter( TRANSLINE_PARAMETERS::SIGMA, 1.0 / CC_TSOLVE_RHO );
+        striplineCalc.SetParameter( TRANSLINE_PARAMETERS::MURC, 1 );
+
+        if( solveWidth )
+            striplineCalc.Synthesize( SYNTHESIZE_OPTS::DEFAULT );
+        else
+            striplineCalc.Analyse();
+
+        resultsPtr = solveWidth ? &striplineCalc.GetSynthesisResults() : &striplineCalc.GetAnalysisResults();
+    }
+
+    RESULTS& results = *resultsPtr;
+
+    if( results[TRANSLINE_PARAMETERS::PHYS_WIDTH].second != TRANSLINE_STATUS::OK )
+    {
+        aProblem = _( "Width calculation failed" );
+        return false;
+    }
+
+    if( results[TRANSLINE_PARAMETERS::UNIT_PROP_DELAY].second != TRANSLINE_STATUS::OK )
+    {
+        aProblem = _( "Delay calculation failed" );
+        return false;
+    }
+
+    calculatedWidth = static_cast<int>( EDA_UNIT_UTILS::UI::FromUserUnit(
+            iuScale, EDA_UNITS::MM, results[TRANSLINE_PARAMETERS::PHYS_WIDTH].first * 1000.0 ) );
+    calculatedDelay = static_cast<int>( EDA_UNIT_UTILS::UI::FromUserUnit(
+            iuScale, EDA_UNITS::PS_PER_CM, results[TRANSLINE_PARAMETERS::UNIT_PROP_DELAY].first ) );
+
+    if( calculatedWidth <= 0 )
+    {
+        aProblem = _( "Could not compute track width" );
+        return false;
+    }
+    else if( calculatedDelay <= 0 )
+    {
+        aProblem = _( "Could not compute track propagation delay" );
+        return false;
+    }
+
+    if( solveWidth )
+        aWidth = calculatedWidth;
+
+    aDelay = calculatedDelay;
+    return true;
+}
+#endif
+
 
 PANEL_SETUP_TUNING_PROFILE_INFO::PANEL_SETUP_TUNING_PROFILE_INFO( wxWindow*                    aParentWindow,
                                                                   PANEL_SETUP_TUNING_PROFILES* parentPanel ) :
@@ -701,6 +1232,59 @@ void PANEL_SETUP_TUNING_PROFILE_INFO::getDielectricLayers( const std::vector<BOA
 
 void PANEL_SETUP_TUNING_PROFILE_INFO::calculateTrackParametersForCell( const int aRow, const int aCol )
 {
+#ifdef __EMSCRIPTEN__
+    // Engine run 15 (K-TSOLVE): the row's facts read from the grid, the solve in ccTuningSolve.
+    const wxString signalLayerName = m_trackPropagationGrid->GetCellValue( aRow, TRACK_GRID_SIGNAL_LAYER );
+
+    if( !m_parentPanel->m_layerNamesToIDs.contains( signalLayerName ) )
+        return;
+
+    auto layerOf = [this]( const wxString& aName ) -> PCB_LAYER_ID
+    {
+        return m_parentPanel->m_layerNamesToIDs.contains( aName ) ? m_parentPanel->m_layerNamesToIDs.at( aName )
+                                                                   : UNDEFINED_LAYER;
+    };
+
+    const PCB_LAYER_ID signalLayer = m_parentPanel->m_layerNamesToIDs.at( signalLayerName );
+    const bool         differential = m_type->GetSelection() != 0;
+    const int          solveFor = aCol == TRACK_GRID_TRACK_GAP ? 1 : aCol == TRACK_GRID_DELAY ? 2 : 0;
+    int                width = m_trackPropagationGrid->GetOptionalUnitValue( aRow, TRACK_GRID_TRACK_WIDTH ).value_or( 0 );
+    int                gap = differential ? m_trackPropagationGrid->GetOptionalUnitValue( aRow, TRACK_GRID_TRACK_GAP )
+                                                    .value_or( 0 )
+                                          : 0;
+    int                delay = 0;
+    wxString           problem;
+
+    if( !ccTuningSolve( m_parentPanel->m_board, m_parentPanel->m_unitsProvider->GetIuScale(), differential,
+                        getTargetImpedance(), signalLayer,
+                        layerOf( m_trackPropagationGrid->GetCellValue( aRow, TRACK_GRID_TOP_REFERENCE ) ),
+                        layerOf( m_trackPropagationGrid->GetCellValue( aRow, TRACK_GRID_BOTTOM_REFERENCE ) ), solveFor,
+                        width, gap, delay, problem ) )
+    {
+        if( !problem.IsEmpty() )
+        {
+            if( problem == _( "Could not compute track width" )
+                || problem == _( "Could not compute differential pair gap" )
+                || problem == _( "Could not compute track propagation delay" ) )
+            {
+                DisplayErrorMessage( m_parentPanel->m_dlg, problem );
+            }
+            else
+            {
+                DisplayErrorMessage( m_parentPanel->m_dlg, wxString::Format( _( "Error: %s" ), problem ) );
+            }
+        }
+
+        return;
+    }
+
+    if( solveFor == 0 )
+        m_trackPropagationGrid->SetUnitValue( aRow, TRACK_GRID_TRACK_WIDTH, width );
+    else if( solveFor == 1 && differential )
+        m_trackPropagationGrid->SetUnitValue( aRow, TRACK_GRID_TRACK_GAP, gap );
+
+    m_trackPropagationGrid->SetUnitValue( aRow, TRACK_GRID_DELAY, delay );
+#else
     // Determine if this is a stripline or microstrip geometry
     const wxString signalLayerName = m_trackPropagationGrid->GetCellValue( aRow, TRACK_GRID_SIGNAL_LAYER );
 
@@ -818,6 +1402,7 @@ void PANEL_SETUP_TUNING_PROFILE_INFO::calculateTrackParametersForCell( const int
 
         m_trackPropagationGrid->SetUnitValue( aRow, TRACK_GRID_DELAY, calculatedDelay );
     }
+#endif
 }
 
 
