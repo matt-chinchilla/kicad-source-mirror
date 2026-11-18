@@ -4,6 +4,9 @@
  * Copyright (C) 2013 CERN
  * Copyright The KiCad Developers, see AUTHORS.txt for contributors.
  * @author Jean-Pierre Charras, jp.charras at wanadoo.fr
+ * Modified by Circuit Center Inc on 2026-11-18: in the WebAssembly editor, Place Bitmaps takes
+ * the picture the host armed in place of the "Choose Image" file dialog, and asks the host for
+ * one when none is armed (K-DS1, ds_editor_host.h).
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -56,6 +59,11 @@
 #include "tools/pl_edit_tool.h"
 #include "tools/pl_point_editor.h"
 #include "invoke_pl_editor_dialog.h"
+
+#ifdef __EMSCRIPTEN__
+#include "ds_editor_host.h"
+#include <wx/buffer.h>
+#endif
 #include "tools/pl_editor_control.h"
 #include <view/view_controls.h>
 
@@ -870,6 +878,35 @@ DS_DATA_ITEM* PL_EDITOR_FRAME::AddDrawingSheetItem( int aType )
 
     case DS_DATA_ITEM::DS_BITMAP:
     {
+#ifdef __EMSCRIPTEN__
+        // K-DS1: the WebAssembly editor never shows KiCad's file dialog. The picture the host
+        // armed (kicadDsEditArmImage) is taken and disarmed; with none armed the host is asked
+        // for one and nothing is placed, as a cancelled dialog places nothing.
+        CC_DS_ARMED_IMAGE& armed = CcArmedImage();
+
+        if( !armed.armed || armed.png.empty() )
+        {
+            CcAskHostDsEdit( "image", nullptr, true );
+            return nullptr;
+        }
+
+        wxMemoryBuffer buffer;
+        buffer.AppendData( armed.png.data(), armed.png.size() );
+        armed = CC_DS_ARMED_IMAGE();
+
+        BITMAP_BASE* image = new BITMAP_BASE();
+
+        if( !image->ReadImageFile( buffer ) )
+        {
+            delete image;
+            return nullptr;
+        }
+
+        // Set the scale factor for pl_editor (it is set for Eeschema by default)
+        image->SetPixelSizeIu( drawSheetIUScale.IU_PER_MILS * 1000.0 / image->GetPPI() );
+        item = new DS_DATA_ITEM_BITMAP( image );
+        break;
+#else
         wxFileDialog fileDlg( this, _( "Choose Image" ), m_mruImagePath, wxEmptyString,
                               FILEEXT::ImageFileWildcard(), wxFD_OPEN );
 
@@ -900,6 +937,7 @@ DS_DATA_ITEM* PL_EDITOR_FRAME::AddDrawingSheetItem( int aType )
         image->SetPixelSizeIu( drawSheetIUScale.IU_PER_MILS * 1000.0 / image->GetPPI() );
         item = new DS_DATA_ITEM_BITMAP( image );
         break;
+#endif
     }
     }
 
