@@ -20,6 +20,10 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: ACTION_TOOLBAR asks the in-browser editor's host
+ * (hostHoldsAction) before a pressed button's or palette item's action runs and drops a held
+ * press (WebAssembly build only).
  */
 
 #include <algorithm>
@@ -42,6 +46,10 @@
 #include <tool/tool_manager.h>
 #include <tool/ui/toolbar_configuration.h>
 #include <tool/ui/toolbar_context_menu_registry.h>
+
+#ifdef __EMSCRIPTEN__
+#include <tool/action_manager.h>
+#endif
 #include <widgets/bitmap_button.h>
 #include <widgets/wx_aui_art_providers.h>
 
@@ -785,6 +793,16 @@ void ACTION_TOOLBAR::onToolEvent( wxAuiToolBarEvent& aEvent )
                 }
             }
 
+#ifdef __EMSCRIPTEN__
+            // K-HOLD: a toolbar press asks the in-browser editor's host as a key does; a held
+            // press is dropped (the group keeps its current action).
+            if( hostHoldsAction( next->GetName() ) )
+            {
+                handled = true;
+            }
+            else
+#endif
+            {
             evt = next->MakeEvent();
             evt->SetHasPosition( false );
             m_toolManager->ProcessEvent( *evt );
@@ -792,7 +810,15 @@ void ACTION_TOOLBAR::onToolEvent( wxAuiToolBarEvent& aEvent )
 
             doSelectAction( group, *next );
             handled = true;
+            }
         }
+#ifdef __EMSCRIPTEN__
+        else if( actionIt != m_toolActions.end() && hostHoldsAction( actionIt->second->GetName() ) )
+        {
+            // K-HOLD: held by the in-browser editor's host, the press is dropped.
+            handled = true;
+        }
+#endif
         else if( actionIt != m_toolActions.end() )
         {
             // Dispatch a tool event
@@ -957,6 +983,15 @@ void ACTION_TOOLBAR::onPaletteEvent( wxCommandEvent& aEvent )
     if( actionIt != group->GetActions().end() )
     {
         const TOOL_ACTION* action = *actionIt;
+
+#ifdef __EMSCRIPTEN__
+        // K-HOLD: a palette press asks the in-browser editor's host as a key does.
+        if( hostHoldsAction( action->GetName() ) )
+        {
+            m_palette->Hide();
+            return;
+        }
+#endif
 
         // Dispatch a tool event
         evt = action->MakeEvent();

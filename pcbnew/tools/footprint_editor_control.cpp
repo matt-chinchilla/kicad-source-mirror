@@ -21,6 +21,11 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: under __EMSCRIPTEN__ the footprint
+ * properties, default pad properties, footprint wizard, new footprint, rename and Cleanup
+ * Graphics actions ask the WebAssembly editor's host (window.kicadHostFpEdit) before KiCad's
+ * dialogs.
  */
 
 #include <advanced_config.h>
@@ -57,6 +62,10 @@
 #include <view/view_controls.h>
 
 #include <memory>
+
+#ifdef __EMSCRIPTEN__
+#include <tools/footprint_editor_host.h>
+#endif
 
 #include "footprint_editor_control.h"
 
@@ -211,6 +220,13 @@ void FOOTPRINT_EDITOR_CONTROL::tryToSaveFootprintInLibrary( FOOTPRINT&    aFootp
 
 int FOOTPRINT_EDITOR_CONTROL::NewFootprint( const TOOL_EVENT& aEvent )
 {
+#ifdef __EMSCRIPTEN__
+    // The host names and types a new footprint in its own window (engine run 15): held, no
+    // unsaved changes box, no name box, nothing cleared.
+    if( CcAskHostFpEdit( "newFootprint", nullptr, false ) )
+        return 0;
+#endif
+
     const LIB_ID   selected = m_frame->GetTargetFPID();
     const wxString libraryName = selected.GetUniStringLibNickname();
 
@@ -247,6 +263,12 @@ int FOOTPRINT_EDITOR_CONTROL::NewFootprint( const TOOL_EVENT& aEvent )
 
 int FOOTPRINT_EDITOR_CONTROL::CreateFootprint( const TOOL_EVENT& aEvent )
 {
+#ifdef __EMSCRIPTEN__
+    // The host draws its own pattern page in place of the footprint wizard (engine run 15).
+    if( CcAskHostFpEdit( "wizard", nullptr, false ) )
+        return 0;
+#endif
+
     LIB_ID selected = m_frame->GetLibTree()->GetSelectedLibId();
 
     if( m_frame->IsContentModified() )
@@ -452,6 +474,12 @@ int FOOTPRINT_EDITOR_CONTROL::DuplicateFootprint( const TOOL_EVENT& aEvent )
 
 int FOOTPRINT_EDITOR_CONTROL::RenameFootprint( const TOOL_EVENT& aEvent )
 {
+#ifdef __EMSCRIPTEN__
+    // The host renames the footprint in its own window (engine run 15): held, no name box.
+    if( CcAskHostFpEdit( "rename", nullptr, false ) )
+        return 0;
+#endif
+
     LIBRARY_EDITOR_CONTROL* libTool   = m_toolMgr->GetTool<LIBRARY_EDITOR_CONTROL>();
     FOOTPRINT_LIBRARY_ADAPTER* adapter = PROJECT_PCB::FootprintLibAdapter( &m_frame->Prj() );
 
@@ -765,6 +793,13 @@ int FOOTPRINT_EDITOR_CONTROL::ToggleProperties( const TOOL_EVENT& aEvent )
 
 int FOOTPRINT_EDITOR_CONTROL::Properties( const TOOL_EVENT& aEvent )
 {
+#ifdef __EMSCRIPTEN__
+    // The host edits the open footprint's properties in its own window (engine run 15). The
+    // page has no library tree, so the tree's other footprint is never the subject there.
+    if( m_frame->GetBoard()->GetFirstFootprint() && CcAskHostFpEdit( "footprint", nullptr, false ) )
+        return 0;
+#endif
+
     // Check if called from tree context menu
     if( aEvent.IsAction( &PCB_ACTIONS::footprintProperties ) )
     {
@@ -853,6 +888,12 @@ void FOOTPRINT_EDITOR_CONTROL::editFootprintPropertiesFromLibrary( const LIB_ID&
 
 int FOOTPRINT_EDITOR_CONTROL::DefaultPadProperties( const TOOL_EVENT& aEvent )
 {
+#ifdef __EMSCRIPTEN__
+    // The host edits the master pad new pads take in its own window (engine run 15).
+    if( CcAskHostFpEdit( "padDefaults", nullptr, false ) )
+        return 0;
+#endif
+
     getEditFrame<FOOTPRINT_EDIT_FRAME>()->ShowPadPropertiesDialog( nullptr );
     return 0;
 }
@@ -860,6 +901,12 @@ int FOOTPRINT_EDITOR_CONTROL::DefaultPadProperties( const TOOL_EVENT& aEvent )
 
 int FOOTPRINT_EDITOR_CONTROL::CleanupGraphics( const TOOL_EVENT& aEvent )
 {
+#ifdef __EMSCRIPTEN__
+    // The host runs Cleanup Graphics from its own window (engine run 15, kicadFpEditCleanup).
+    if( CcAskHostFpEdit( "cleanup", nullptr, false ) )
+        return 0;
+#endif
+
     FOOTPRINT_EDIT_FRAME* editFrame = getEditFrame<FOOTPRINT_EDIT_FRAME>();
     DIALOG_CLEANUP_GRAPHICS dlg( editFrame, true );
 

@@ -19,6 +19,10 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: DIALOG_ASSIGN_NETCLASS asks the in-browser
+ * editor's host to answer it (host_prompt.h, ask assignNetclass) before KiCad's own dialog shows
+ * (WebAssembly build only).
  */
 
 #include "dialogs/dialog_assign_netclass.h"
@@ -31,6 +35,10 @@
 #include <project/net_settings.h>
 #include <eda_base_frame.h>
 #include <string_utils.h>
+
+#ifdef __EMSCRIPTEN__
+#include <host_prompt.h>
+#endif
 
 
 wxString UpgradeGlobStarToRegex( const wxString& aPattern )
@@ -228,3 +236,81 @@ void DIALOG_ASSIGN_NETCLASS::onPatternText( wxCommandEvent& aEvent )
         m_lastPattern = pattern;
     }
 }
+
+
+#ifdef __EMSCRIPTEN__
+int DIALOG_ASSIGN_NETCLASS::ShowModal()
+{
+    TransferDataToWindow();
+
+    nlohmann::json record;
+    record["pattern"] = m_patternCtrl->GetValue().ToStdString( wxConvUTF8 );
+    record["netclass"] = m_netclassCtrl->GetStringSelection().ToStdString( wxConvUTF8 );
+    record["netclasses"] = nlohmann::json::array();
+
+    for( unsigned ii = 0; ii < m_netclassCtrl->GetCount(); ++ii )
+        record["netclasses"].push_back( m_netclassCtrl->GetString( ii ).ToStdString( wxConvUTF8 ) );
+
+    class RECEIVER : public CC_PROMPT_RECEIVER
+    {
+    public:
+        explicit RECEIVER( DIALOG_ASSIGN_NETCLASS* aDialog ) : m_dialog( aDialog ) {}
+
+        bool CcApply( const nlohmann::json& aAnswer, std::string& aField ) override
+        {
+            if( !aAnswer.is_object() )
+                return false;
+
+            if( aAnswer.contains( "pattern" ) && !aAnswer["pattern"].is_string() )
+            {
+                aField = "pattern";
+                return false;
+            }
+
+            int selection = m_dialog->m_netclassCtrl->GetSelection();
+
+            if( aAnswer.contains( "netclass" ) )
+            {
+                if( !aAnswer["netclass"].is_string() )
+                {
+                    aField = "netclass";
+                    return false;
+                }
+
+                selection = m_dialog->m_netclassCtrl->FindString(
+                        wxString::FromUTF8( aAnswer["netclass"].get<std::string>() ), true );
+
+                if( selection == wxNOT_FOUND )
+                {
+                    aField = "netclass";
+                    return false;
+                }
+            }
+
+            if( aAnswer.contains( "pattern" ) )
+            {
+                m_dialog->m_patternCtrl->SetValue(
+                        wxString::FromUTF8( aAnswer["pattern"].get<std::string>() ) );
+            }
+
+            m_dialog->m_netclassCtrl->SetSelection( selection );
+            return m_dialog->TransferDataFromWindow();
+        }
+
+    private:
+        DIALOG_ASSIGN_NETCLASS* m_dialog;
+    };
+
+    RECEIVER receiver( this );
+
+    switch( CcHostPromptModal( "assignNetclass", record, receiver ) )
+    {
+    case 1:  SetReturnCode( wxID_OK );     return wxID_OK;
+    case 0:  SetReturnCode( wxID_CANCEL ); return wxID_CANCEL;
+    default:
+        // KiCad's own dialog fills the list again in its own TransferDataToWindow.
+        m_netclassCtrl->Clear();
+        return DIALOG_ASSIGN_NETCLASS_BASE::ShowModal();
+    }
+}
+#endif // __EMSCRIPTEN__

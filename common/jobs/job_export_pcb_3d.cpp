@@ -3,6 +3,8 @@
  *
  * Copyright (C) 2023 Mark Roszko <mark.roszko@gmail.com>
  * Copyright The KiCad Developers, see AUTHORS.txt for contributors.
+ * Modified by Circuit Center Inc on 2026-11-18: in the WebAssembly build the job keys net_filter
+ * and component_filter carry the export's net and part filters to the 3D service.
  *
  * This program is free software: you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -147,6 +149,14 @@ JOB_EXPORT_PCB_3D::JOB_EXPORT_PCB_3D() :
     m_params.emplace_back( new JOB_PARAM<EXPORTER_STEP_PARAMS::FORMAT>( "occt_format", &m_3dparams.m_Format,
                                                                         m_3dparams.m_Format ) );
     m_params.emplace_back( new JOB_PARAM<wxString>( "variant", &m_variant, m_variant ) );
+#ifdef __EMSCRIPTEN__
+    // The 3D service reads the job back from its JSON: the filters ride as keys.
+    m_params.emplace_back( new JOB_PARAM<wxString>( "net_filter", &m_3dparams.m_NetFilter,
+                                                    m_3dparams.m_NetFilter ) );
+    m_params.emplace_back( new JOB_PARAM<wxString>( "component_filter",
+                                                    &m_3dparams.m_ComponentFilter,
+                                                    m_3dparams.m_ComponentFilter ) );
+#endif
 }
 
 

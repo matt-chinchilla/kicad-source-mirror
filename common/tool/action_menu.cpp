@@ -22,6 +22,10 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: ACTION_MENU::OnMenuEvent asks the in-browser
+ * editor's host (hostHoldsAction) before a pressed menu item's action runs and drops a held press
+ * (WebAssembly build only).
  */
 
 #include "tool/action_menu.h"
@@ -44,6 +48,10 @@
 #include <trace_helpers.h>
 #include <textentry_tricks.h>
 #include <widgets/ui_common.h>
+
+#ifdef __EMSCRIPTEN__
+#include <tool/action_manager.h>
+#endif
 
 using namespace std::placeholders;
 
@@ -594,6 +602,40 @@ void ACTION_MENU::OnMenuEvent( wxMenuEvent& aEvent )
         {
             evt->SetMousePosition( toolMgr->GetMousePosition() );
         }
+
+#ifdef __EMSCRIPTEN__
+        // K-HOLD: a menu press (the menu bar, a submenu, a context menu) asks the in-browser
+        // editor's host exactly as a key does (ACTION_MANAGER::RunHotKey); a held press is
+        // dropped and the host opens its own window.
+        if( type == wxEVT_COMMAND_MENU_SELECTED
+                && toolMgr->GetActionManager()->IsActionUIId( m_selected ) )
+        {
+            const TOOL_ACTION* pressed = nullptr;
+
+            std::function<void( const ACTION_MENU* )> findPressed =
+                    [&]( const ACTION_MENU* aMenu )
+                    {
+                        if( pressed )
+                            return;
+
+                        const auto it = aMenu->m_toolActions.find( m_selected );
+
+                        if( it != aMenu->m_toolActions.end() )
+                        {
+                            pressed = it->second;
+                            return;
+                        }
+
+                        for( const ACTION_MENU* submenu : aMenu->m_submenus )
+                            findPressed( submenu );
+                    };
+
+            findPressed( this );
+
+            if( pressed && hostHoldsAction( pressed->GetName() ) )
+                return;
+        }
+#endif
 
         toolMgr->ProcessEvent( *evt );
     }

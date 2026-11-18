@@ -3,6 +3,8 @@
  *
  * Copyright (C) 2019 Alexander Shuklin <Jasuramme@gmail.com>
  * Copyright The KiCad Developers, see AUTHORS.txt for contributors.
+ * Modified by Circuit Center Inc on 2026-11-18: CcProcessNetNames, the net name pass over pads
+ * the in-browser host hands in, with its outcome per pin (under __EMSCRIPTEN__).
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -32,6 +34,7 @@
 #include <sch_reference_list.h>
 #include <template_fieldnames.h>
 #include <wx/string.h>
+#include <kiid.h>
 
 // Forward declarations
 class REPORTER;
@@ -147,6 +150,38 @@ public:
      */
     bool BackAnnotateSymbols( const std::string& aNetlist );
 
+#ifdef __EMSCRIPTEN__
+    /// One board pad's net as the board's MAIL_PCB_GET_NETLIST reply carries it (short name).
+    struct CC_PAD_NET
+    {
+        wxString ref;
+        wxString pad;
+        wxString net;
+    };
+
+    /// One pin whose net name differs from its pad's: what the net name pass did, or would do.
+    struct CC_NET_ROW
+    {
+        wxString ref;
+        wxString pin;
+        wxString from;
+        wxString to;
+        wxString sheetPath;
+        KIID     label;     ///< the label renamed (niluuid when a label is added or refused)
+        wxString outcome;   ///< "rename", "add" or "refused"
+    };
+
+    /**
+     * The net name pass of applyChangelist (processNetNameChange per pin whose schematic net
+     * name differs from its pad's) over pads the in-browser host hands in, in place of the
+     * board's kiway reply (the standalone engine has no kiway to the board). Symbols are
+     * matched by reference. Every change goes into aCommit (nothing when the pass was made
+     * with aDryRun); the caller pushes it.
+     */
+    std::vector<CC_NET_ROW> CcProcessNetNames( SCH_COMMIT* aCommit,
+                                               const std::vector<CC_PAD_NET>& aPads );
+#endif
+
 private:
     /**
      * Parse netlist sent over KiWay express mail interface and fill \ref m_pcbModules.
@@ -201,4 +236,9 @@ private:
     SCH_EDIT_FRAME*              m_frame;
 
     int                          m_changesCount;    // Number of user-level changes
+
+#ifdef __EMSCRIPTEN__
+    KIID                         m_ccLastLabel;     ///< CcProcessNetNames: the last pass's label
+    wxString                     m_ccLastOutcome;   ///< CcProcessNetNames: the last pass's outcome
+#endif
 };

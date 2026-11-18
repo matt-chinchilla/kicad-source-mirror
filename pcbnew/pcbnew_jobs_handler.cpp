@@ -7,6 +7,9 @@
  * Modified by Circuit Center Inc on 2026-11-18: the render job (pcb_render) is compiled into the
  * WebAssembly build: registered with no settings dialog, run by a copy of JobExportRender that
  * yields to the browser between the raytracer's passes and reports each pass's percent.
+ * Modified by Circuit Center Inc on 2026-11-18: in the WebAssembly build the drill job's default
+ * report path, built inside the output folder, is resolved once (resolved twice it named the
+ * folder itself and the report failed with exit code 4).
  *
  * This program is free software: you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -2181,6 +2184,10 @@ int PCBNEW_JOBS_HANDLER::JobExportDrill( JOB* aJob )
     }
 
 
+#ifdef __EMSCRIPTEN__
+    bool reportPathResolved = false;
+#endif
+
     if( aDrillJob->m_generateReport && aDrillJob->m_reportPath.IsEmpty() )
     {
         wxFileName fn = outPath;
@@ -2189,6 +2196,12 @@ int PCBNEW_JOBS_HANDLER::JobExportDrill( JOB* aJob )
         fn.SetExt( FILEEXT::ReportFileExtension );
 
         aDrillJob->m_reportPath = fn.GetFullPath();
+#ifdef __EMSCRIPTEN__
+        // Built inside outPath, already resolved: resolving it again (as a directory) turns this
+        // absolute path into the job's temporary output folder itself, and the report is then
+        // written over a folder (exit code 4, no files).
+        reportPathResolved = true;
+#endif
     }
 
     if( aDrillJob->m_format == JOB_EXPORT_PCB_DRILL::DRILL_FORMAT::EXCELLON )
@@ -2243,7 +2256,14 @@ int PCBNEW_JOBS_HANDLER::JobExportDrill( JOB* aJob )
 
         if( aDrillJob->m_generateReport )
         {
+#ifdef __EMSCRIPTEN__
+            wxString reportPath = reportPathResolved
+                                          ? aDrillJob->m_reportPath
+                                          : aDrillJob->ResolveOutputPath( aDrillJob->m_reportPath,
+                                                                          true, brd->GetProject() );
+#else
             wxString reportPath = aDrillJob->ResolveOutputPath( aDrillJob->m_reportPath, true, brd->GetProject() );
+#endif
 
             if( !excellonWriter->GenDrillReportFile( reportPath ) )
             {
@@ -2273,7 +2293,14 @@ int PCBNEW_JOBS_HANDLER::JobExportDrill( JOB* aJob )
 
         if( aDrillJob->m_generateReport )
         {
+#ifdef __EMSCRIPTEN__
+            wxString reportPath = reportPathResolved
+                                          ? aDrillJob->m_reportPath
+                                          : aDrillJob->ResolveOutputPath( aDrillJob->m_reportPath,
+                                                                          true, brd->GetProject() );
+#else
             wxString reportPath = aDrillJob->ResolveOutputPath( aDrillJob->m_reportPath, true, brd->GetProject() );
+#endif
 
             if( !gerberWriter->GenDrillReportFile( reportPath ) )
             {

@@ -19,6 +19,9 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: WX_TEXT_ENTRY_DIALOG declares a ShowModal that
+ * asks the in-browser editor's host first (WebAssembly build only).
  */
 
 
@@ -44,5 +47,11 @@ public:
     void SetTextValidator( const wxTextValidator& validator );
 
     wxString GetValue() const;
+
+#ifdef __EMSCRIPTEN__
+    /// Asks the in-browser editor's host first (host_prompt.h, ask "entry"); KiCad's dialog
+    /// only when the host does not take it.
+    int ShowModal() override;
+#endif
 };
 

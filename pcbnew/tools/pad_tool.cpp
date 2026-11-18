@@ -19,6 +19,11 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: under __EMSCRIPTEN__ the footprint editor's
+ * Push Pad Settings, Enumerate Pads and pad table ask the WebAssembly editor's host
+ * (window.kicadHostFpEdit) before KiCad's dialogs, and enumerateLoop runs Enumerate Pads'
+ * interactive loop with the host's numbering in place of the dialog's.
  */
 
 
@@ -46,6 +51,10 @@
 #include <tools/edit_tool.h>
 #include <dialogs/dialog_enum_pads.h>
 #include <widgets/wx_infobar.h>
+
+#ifdef __EMSCRIPTEN__
+#include <tools/footprint_editor_host.h>
+#endif
 
 
 using KIGFX::PCB_RENDER_SETTINGS;
@@ -250,6 +259,13 @@ int PAD_TOOL::pushPadSettings( const TOOL_EVENT& aEvent )
 
         if( FOOTPRINT* footprint = srcPad->GetParentFootprint() )
         {
+#ifdef __EMSCRIPTEN__
+            // The footprint editor's host pushes the pad's settings from its own window
+            // (engine run 15): held, no dialog and nothing changed.
+            if( m_isFootprintEditor && CcAskHostFpEdit( "pushPad", &srcPad->m_Uuid, false ) )
+                return 0;
+#endif
+
             frame()->SetMsgPanel( footprint );
 
             DIALOG_PUSH_PAD_PROPERTIES dlg( frame() );
@@ -296,6 +312,32 @@ static std::optional<SEQUENTIAL_PAD_ENUMERATION_PARAMS> GetSequentialPadNumberin
 }
 
 
+#ifdef __EMSCRIPTEN__
+// The numbering enumerateLoop hands to the next EnumeratePads run in place of the dialog's;
+// taken (and cleared) by that run once it is past its own checks.
+static std::optional<SEQUENTIAL_PAD_ENUMERATION_PARAMS> s_ccHostEnumParams;
+
+
+int PAD_TOOL::enumerateLoop( const SEQUENTIAL_PAD_ENUMERATION_PARAMS& aParams )
+{
+    // EnumeratePads' loop waits on tool events, so it runs as the action's own handler (a
+    // tool coroutine) with these numbers taken in place of the dialog's. Answers 1 when the
+    // loop started with them, 0 when the action refused (not the footprint editor, pad edit
+    // mode, no pads), and then nothing was changed.
+    s_ccHostEnumParams = aParams;
+    m_toolMgr->RunAction( PCB_ACTIONS::enumeratePads );
+
+    if( s_ccHostEnumParams )
+    {
+        s_ccHostEnumParams.reset();
+        return 0;
+    }
+
+    return 1;
+}
+#endif
+
+
 int PAD_TOOL::EnumeratePads( const TOOL_EVENT& aEvent )
 {
     if( !m_isFootprintEditor || InPadEditMode() )
@@ -311,7 +353,28 @@ int PAD_TOOL::EnumeratePads( const TOOL_EVENT& aEvent )
     guide.SetIgnoreFPValues( true );
     guide.SetIgnoreFPReferences( true );
 
+#ifdef __EMSCRIPTEN__
+    // The host's numbering (enumerateLoop) runs the loop with no dialog; otherwise the host
+    // is asked first and, holding it, the loop does not start (the page answers through
+    // enumerateLoop).
+    std::optional<SEQUENTIAL_PAD_ENUMERATION_PARAMS> params;
+
+    if( s_ccHostEnumParams )
+    {
+        params = s_ccHostEnumParams;
+        s_ccHostEnumParams.reset();
+    }
+    else if( CcAskHostFpEdit( "enumerate", nullptr, false ) )
+    {
+        return 0;
+    }
+    else
+    {
+        params = GetSequentialPadNumberingParams( frame() );
+    }
+#else
     const std::optional<SEQUENTIAL_PAD_ENUMERATION_PARAMS> params = GetSequentialPadNumberingParams( frame() );
+#endif
 
     // Cancelled or otherwise failed to get any useful parameters
     if( !params )
@@ -892,6 +955,12 @@ int PAD_TOOL::PadTable( const TOOL_EVENT& aEvent )
 
     if( !footprint )
         return 0;
+
+#ifdef __EMSCRIPTEN__
+    // The host edits the pad table in its own window (engine run 15).
+    if( CcAskHostFpEdit( "padTable", nullptr, false ) )
+        return 0;
+#endif
 
     DIALOG_FP_EDIT_PAD_TABLE dlg( frame(), footprint );
     dlg.ShowQuasiModal();

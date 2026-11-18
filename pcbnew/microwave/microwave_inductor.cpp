@@ -19,6 +19,11 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: createMicrowaveInductor reads the host's armed
+ * track length (cc_microwave_arm.h) in place of its length dialog and keeps the default value
+ * L in place of its value dialog when the running action was armed; a plain build is
+ * unchanged.
  */
 
 #include <base_units.h>
@@ -36,6 +41,10 @@
 #include <tools/pcb_actions.h>
 #include <pcb_edit_frame.h>
 #include <validators.h>
+
+#ifdef __EMSCRIPTEN__
+#include <microwave/cc_microwave_arm.h>
+#endif
 
 /**
  * Function  gen_arc
@@ -364,6 +373,18 @@ FOOTPRINT* MICROWAVE_TOOL::createMicrowaveInductor( MICROWAVE_INDUCTOR_PATTERN& 
 
     // Enter the desired length.
     wxString             msg = editFrame->StringFromValue( aInductorPattern.m_Length );
+
+#ifdef __EMSCRIPTEN__
+    // The host's armed length (cc_microwave_arm.h) in place of the length dialog.
+    const CC_MICROWAVE_ARM* armed = cc_microwave::Active( CC_MICROWAVE_SHAPE::LINE );
+
+    if( armed )
+    {
+        aInductorPattern.m_Length = pcbIUScale.mmToIU( armed->m_valueMm );
+    }
+    else
+    {
+#endif
     WX_TEXT_ENTRY_DIALOG dlg( editFrame, _( "Length of track:" ), _( "Create Microwave Footprint" ), msg );
 
     // TODO: why is this QuasiModal?
@@ -371,6 +392,9 @@ FOOTPRINT* MICROWAVE_TOOL::createMicrowaveInductor( MICROWAVE_INDUCTOR_PATTERN& 
         return nullptr; // canceled by user
 
     aInductorPattern.m_Length = editFrame->ValueFromString( dlg.GetValue() );
+#ifdef __EMSCRIPTEN__
+    }
+#endif
 
     // Control values (ii = minimum length)
     if( aInductorPattern.m_Length < min_len )
@@ -403,12 +427,21 @@ FOOTPRINT* MICROWAVE_TOOL::createMicrowaveInductor( MICROWAVE_INDUCTOR_PATTERN& 
 
     // Generate footprint. the value is also used as footprint name.
     msg = wxT( "L" );
+
+#ifdef __EMSCRIPTEN__
+    // An armed run keeps the dialog's own default value, "L", with no dialog.
+    if( !armed )
+    {
+#endif
     WX_TEXT_ENTRY_DIALOG cmpdlg( editFrame, _( "Component value:" ), _( "Create Microwave Footprint" ), msg );
     cmpdlg.SetTextValidator( FOOTPRINT_NAME_VALIDATOR( &msg ) );
 
     // TODO: why is this QuasiModal?
     if( ( cmpdlg.ShowQuasiModal() != wxID_OK ) || msg.IsEmpty() )
         return nullptr;    //  Aborted by user
+#ifdef __EMSCRIPTEN__
+    }
+#endif
 
     FOOTPRINT* footprint = editFrame->CreateNewFootprint( msg, wxEmptyString );
 

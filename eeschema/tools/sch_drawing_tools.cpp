@@ -3,6 +3,16 @@
  *
  * Copyright (C) 2019-2023 CERN
  * Copyright The KiCad Developers, see AUTHORS.txt for contributors.
+ * Modified by Circuit Center Inc on 2026-11-18: a new label, text, text box, sheet or picture
+ * asks the in-browser editor's host (window.kicadHostSchItem) before KiCad's dialog or file
+ * box, and goes down as that dialog's OK would place it when the host holds the request
+ * (under __EMSCRIPTEN__).
+ * Modified by Circuit Center Inc on 2026-11-18: the sheet pin and hierarchical label tools read
+ * a placement template the in-browser host arms (K-SYNCPIN) where they read the sync sheet
+ * pins dialog's (under __EMSCRIPTEN__).
+ * Modified by Circuit Center Inc on 2026-11-18: placing a design block takes the block the
+ * in-browser host holds (K-B1) with its own place options, never the Design Blocks pane
+ * (under __EMSCRIPTEN__).
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -76,6 +86,25 @@
 #include <wildcards_and_files_ext.h>
 #include <wx/filedlg.h>
 #include <wx/msgdlg.h>
+
+#ifdef __EMSCRIPTEN__
+#include <tools/sch_item_host.h>
+#include <cc_host_design_block.h>
+
+// K-B1: the place options of the host block being placed (taken from the slot with it), read
+// where KiCad reads the Design Blocks chooser's settings; none for a block from the pane.
+static std::optional<CC_HOST_DESIGN_BLOCK_OPTIONS> s_ccBlockOptions;
+
+// K-SYNCPIN: the sync dialog's placement template when it has one, else the template the
+// in-browser host armed (kicadSheetPinsPlace), else none.
+static SCH_HIERLABEL* ccSyncPlacementTemplate( DIALOG_SYNC_SHEET_PINS* aDialog )
+{
+    if( aDialog && aDialog->GetPlacementTemplate() )
+        return aDialog->GetPlacementTemplate();
+
+    return CcSyncTemplate().Current();
+}
+#endif
 
 
 namespace
@@ -794,6 +823,24 @@ int SCH_DRAWING_TOOLS::ImportSheet( const TOOL_EVENT& aEvent )
 
     if( placingDesignBlock )
     {
+#ifdef __EMSCRIPTEN__
+        s_ccBlockOptions.reset();
+
+        if( ccHostDesignBlock() )
+        {
+            // K-B1: the host's block, taken whole with its options; the pane is never read.
+            CC_HOST_DESIGN_BLOCK_OPTIONS options;
+            designBlock = ccTakeHostDesignBlock( &options );
+            sheetFileName = designBlock->GetSchematicFile();
+
+            if( sheetFileName.IsEmpty() || !wxFileExists( sheetFileName ) )
+                return 0;
+
+            s_ccBlockOptions = options;
+        }
+        else
+        {
+#endif
         SCH_DESIGN_BLOCK_PANE* designBlockPane = m_frame->GetDesignBlockPane();
 
         if( designBlockPane->GetSelectedLibId().IsValid() )
@@ -818,6 +865,9 @@ int SCH_DRAWING_TOOLS::ImportSheet( const TOOL_EVENT& aEvent )
                 return 0;
             }
         }
+#ifdef __EMSCRIPTEN__
+        }
+#endif
     }
     else
     {
@@ -843,6 +893,14 @@ int SCH_DRAWING_TOOLS::ImportSheet( const TOOL_EVENT& aEvent )
                 EDA_ITEMS newItems;
                 bool      keepAnnotations = cfg->m_DesignBlockChooserPanel.keep_annotations;
                 bool      placeAsGroup = cfg->m_DesignBlockChooserPanel.place_as_group;
+
+#ifdef __EMSCRIPTEN__
+                if( designBlock && s_ccBlockOptions )
+                {
+                    keepAnnotations = s_ccBlockOptions->keepAnnotations;
+                    placeAsGroup = s_ccBlockOptions->asGroup;
+                }
+#endif
 
                 selectionTool->ClearSelection();
 
@@ -1049,7 +1107,21 @@ int SCH_DRAWING_TOOLS::ImportSheet( const TOOL_EVENT& aEvent )
 
     // If we're placing sheet contents, we don't even want to run our tool loop, just add the items
     // to the canvas and run the move tool
+#ifdef __EMSCRIPTEN__
+    // K-B1: a host block places once, as a sheet or as its contents by its own option.
+    if( designBlock && s_ccBlockOptions && !s_ccBlockOptions->asSheet )
+    {
+        placeSheetContents();
+        s_ccBlockOptions.reset();
+
+        m_toolMgr->RunAction( ACTIONS::selectionClear );
+        m_view->ClearPreview();
+        return 0;
+    }
+    else if( !( designBlock && s_ccBlockOptions ) && !cfg->m_DesignBlockChooserPanel.place_as_sheet )
+#else
     if( !cfg->m_DesignBlockChooserPanel.place_as_sheet )
+#endif
     {
         while( placeSheetContents() && cfg->m_DesignBlockChooserPanel.repeated_placement )
         {}
@@ -1277,6 +1349,18 @@ int SCH_DRAWING_TOOLS::PlaceImage( const TOOL_EVENT& aEvent )
             if( !image )
             {
                 m_toolMgr->RunAction( ACTIONS::selectionClear );
+
+#ifdef __EMSCRIPTEN__
+                // The host chooses the picture with its own file chooser and places it through
+                // this tool with the image as its parameter (kicadSchPlaceImage): the tool ends
+                // here, so that placement finds it free.
+                if( CcAskHostSchItem( "image", niluuid, m_frame->GetCurrentSheet().PathAsString(),
+                                      true ) )
+                {
+                    m_frame->PopTool( aEvent );
+                    break;
+                }
+#endif
 
                 wxFileDialog dlg( m_frame, _( "Choose Image" ), m_mruPath, wxEmptyString,
                                   FILEEXT::ImageFileWildcard(), wxFD_OPEN );
@@ -1956,6 +2040,15 @@ bool SCH_DRAWING_TOOLS::createNewLabel( const VECTOR2I& aPosition, int aType,
         // Auto-create from attached wire
         labelItem->SetText( netName );
     }
+#ifdef __EMSCRIPTEN__
+    else if( CcAskHostSchItem( "label", labelItem->m_Uuid,
+                               m_frame->GetCurrentSheet().PathAsString(), true ) )
+    {
+        // The host's form edits the label once placed: it goes down with the name KiCad's
+        // repeat would give it (the last label of its kind incremented), else "Label".
+        labelItem->SetText( CcProposedLabelText( m_frame->GetScreen(), labelItem->Type() ) );
+    }
+#endif
     else
     {
         DIALOG_LABEL_PROPERTIES dlg( m_frame, labelItem, true );
@@ -2015,6 +2108,25 @@ SCH_TEXT* SCH_DRAWING_TOOLS::createNewText( const VECTOR2I& aPosition )
     textItem->SetTextAngle( m_lastTextAngle );
     textItem->SetFlags( IS_NEW | IS_MOVING );
 
+#ifdef __EMSCRIPTEN__
+    // The host's form edits the text once placed (it opens with the text field focused).
+    if( CcAskHostSchItem( "text", textItem->m_Uuid, m_frame->GetCurrentSheet().PathAsString(),
+                          true ) )
+    {
+        textItem->SetText( wxT( "Text" ) );
+    }
+    else
+    {
+        DIALOG_TEXT_PROPERTIES dlg( m_frame, textItem );
+
+        // QuasiModal required for syntax help and Scintilla auto-complete
+        if( dlg.ShowQuasiModal() != wxID_OK )
+        {
+            delete textItem;
+            return nullptr;
+        }
+    }
+#else
     DIALOG_TEXT_PROPERTIES dlg( m_frame, textItem );
 
     // QuasiModal required for syntax help and Scintilla auto-complete
@@ -2023,6 +2135,7 @@ SCH_TEXT* SCH_DRAWING_TOOLS::createNewText( const VECTOR2I& aPosition )
         delete textItem;
         return nullptr;
     }
+#endif
 
     m_lastTextBold = textItem->IsBold();
     m_lastTextItalic = textItem->IsItalic();
@@ -2256,9 +2369,14 @@ int SCH_DRAWING_TOOLS::TwoClickPlace( const TOOL_EVENT& aEvent )
                 }
                 else if( isHierLabel )
                 {
+#ifdef __EMSCRIPTEN__
+                    if( SCH_HIERLABEL* pin = ccSyncPlacementTemplate( m_dialogSyncSheetPin.get() ) )
+                    {
+#else
                     if( m_dialogSyncSheetPin && m_dialogSyncSheetPin->GetPlacementTemplate() )
                     {
                         auto pin = static_cast<SCH_HIERLABEL*>( m_dialogSyncSheetPin->GetPlacementTemplate() );
+#endif
                         SCH_HIERLABEL* label = new SCH_HIERLABEL( cursorPos );
                         SCHEMATIC*     schematic = getModel<SCHEMATIC>();
                         label->SetText( pin->GetText() );
@@ -2315,12 +2433,19 @@ int SCH_DRAWING_TOOLS::TwoClickPlace( const TOOL_EVENT& aEvent )
                     else
                     {
                         // User is using the 'Sync Sheet Pins' tool
+#ifdef __EMSCRIPTEN__
+                        if( SCH_HIERLABEL* syncLabel = ccSyncPlacementTemplate( m_dialogSyncSheetPin.get() ) )
+                        {
+                            item = createNewSheetPinFromLabel( sheet, cursorPos, syncLabel );
+                        }
+#else
                         if( m_dialogSyncSheetPin && m_dialogSyncSheetPin->GetPlacementTemplate() )
                         {
                             item = createNewSheetPinFromLabel(
                                     sheet, cursorPos,
                                     static_cast<SCH_HIERLABEL*>( m_dialogSyncSheetPin->GetPlacementTemplate() ) );
                         }
+#endif
                         else
                         {
                             // User is using the 'Place Sheet Pins' tool
@@ -2415,6 +2540,23 @@ int SCH_DRAWING_TOOLS::TwoClickPlace( const TOOL_EVENT& aEvent )
                     m_dialogSyncSheetPin->Show( true );
                     break;
                 }
+#ifdef __EMSCRIPTEN__
+                else if( CcSyncTemplate().Current() )
+                {
+                    // The host's armed template: the next name, or the tool ends as the dialog's.
+                    CcSyncTemplate().EndPlaceItem();
+
+                    if( CcSyncTemplate().CanPlaceMore() )
+                    {
+                        item = nullptr;
+                        goto PLACE_NEXT;
+                    }
+
+                    m_frame->PopTool( aEvent );
+                    m_toolMgr->RunAction( ACTIONS::selectionClear );
+                    break;
+                }
+#endif
 
                 item = nullptr;
 
@@ -2544,6 +2686,11 @@ int SCH_DRAWING_TOOLS::TwoClickPlace( const TOOL_EVENT& aEvent )
         m_dialogSyncSheetPin->EndPlacement();
         m_dialogSyncSheetPin->Show( true );
     }
+
+#ifdef __EMSCRIPTEN__
+    // Esc or a tool switch ends the host's placement too: nothing stays armed.
+    CcSyncTemplate().EndPlacement();
+#endif
 
     return 0;
 }
@@ -2722,6 +2869,25 @@ int SCH_DRAWING_TOOLS::DrawShape( const TOOL_EVENT& aEvent )
                 if( isTextBox )
                 {
                     SCH_TEXTBOX*           textbox = static_cast<SCH_TEXTBOX*>( item );
+#ifdef __EMSCRIPTEN__
+                    getViewControls()->SetAutoPan( false );
+                    getViewControls()->CaptureCursor( false );
+
+                    // The host's form edits the text box once drawn; it goes down empty, as
+                    // KiCad's dialog's OK with nothing typed leaves it.
+                    if( !CcAskHostSchItem( "textbox", textbox->m_Uuid,
+                                           m_frame->GetCurrentSheet().PathAsString(), true ) )
+                    {
+                        DIALOG_TEXT_PROPERTIES dlg( m_frame, textbox );
+
+                        // QuasiModal required for syntax help and Scintilla auto-complete
+                        if( dlg.ShowQuasiModal() != wxID_OK )
+                        {
+                            cleanup();
+                            continue;
+                        }
+                    }
+#else
                     DIALOG_TEXT_PROPERTIES dlg( m_frame, textbox );
 
                     getViewControls()->SetAutoPan( false );
@@ -2733,6 +2899,7 @@ int SCH_DRAWING_TOOLS::DrawShape( const TOOL_EVENT& aEvent )
                         cleanup();
                         continue;
                     }
+#endif
 
                     m_lastTextBold = textbox->IsBold();
                     m_lastTextItalic = textbox->IsItalic();
@@ -3491,8 +3658,37 @@ int SCH_DRAWING_TOOLS::DrawSheet( const TOOL_EVENT& aEvent )
             getViewControls()->SetAutoPan( false );
             getViewControls()->CaptureCursor( false );
 
+#ifdef __EMSCRIPTEN__
+            bool sheetTaken = false;
+
+            // The host's form edits the sheet once drawn: it goes down as KiCad's sheet dialog's
+            // OK would leave it, its name as made above and its file the first free one of that
+            // name (ccNextSheetFileName), made through ChangeSheetFile's steps with no message box.
+            if( CcAskHostSchItem( "sheet", sheet->m_Uuid, m_frame->GetCurrentSheet().PathAsString(),
+                                  true ) )
+            {
+                const wxString file = ccNextSheetFileName( m_frame, sheet->GetFileName() );
+                bool           clearAnnotation = false;
+
+                sheetTaken = ccChangeSheetFile( m_frame, sheet, m_frame->GetCurrentSheet(), file,
+                                                CC_SHEET_FILE_MODE::RENAME, &clearAnnotation,
+                                                nullptr, &filename, nullptr );
+
+                if( sheetTaken )
+                    sheet->SetFileName( file );
+            }
+            else
+            {
+                sheetTaken = m_frame->EditSheetProperties( static_cast<SCH_SHEET*>( sheet ),
+                                                           &m_frame->GetCurrentSheet(), nullptr,
+                                                           nullptr, nullptr, &filename );
+            }
+
+            if( sheetTaken )
+#else
             if( m_frame->EditSheetProperties( static_cast<SCH_SHEET*>( sheet ), &m_frame->GetCurrentSheet(),
                                               nullptr, nullptr, nullptr, &filename ) )
+#endif
             {
                 m_view->ClearPreview();
 
@@ -3511,9 +3707,20 @@ int SCH_DRAWING_TOOLS::DrawSheet( const TOOL_EVENT& aEvent )
                 // The cached hierarchy was built before this sheet was added.
                 m_frame->Schematic().RefreshHierarchy();
 
+#ifdef __EMSCRIPTEN__
+                // K-B1: a host block keeps designators by its own option.
+                const bool keepBlockAnnotations =
+                        ( isDrawSheetFromDesignBlock && s_ccBlockOptions )
+                                ? s_ccBlockOptions->keepAnnotations
+                                : cfg->m_DesignBlockChooserPanel.keep_annotations;
+                bool annotateNonPowerSymbols = cfg->m_AnnotatePanel.automatic
+                                               && !( ( isDrawSheetCopy || isDrawSheetFromDesignBlock )
+                                                     && keepBlockAnnotations );
+#else
                 bool annotateNonPowerSymbols = cfg->m_AnnotatePanel.automatic
                                                && !( ( isDrawSheetCopy || isDrawSheetFromDesignBlock )
                                                      && cfg->m_DesignBlockChooserPanel.keep_annotations );
+#endif
                 bool annotatePowerSymbols = isDrawSheetFromDesignBlock;
 
                 if( annotateNonPowerSymbols || annotatePowerSymbols )
@@ -3548,7 +3755,13 @@ int SCH_DRAWING_TOOLS::DrawSheet( const TOOL_EVENT& aEvent )
                     }
                 }
 
+#ifdef __EMSCRIPTEN__
+                if( isDrawSheetFromDesignBlock
+                        && ( s_ccBlockOptions ? s_ccBlockOptions->asGroup
+                                              : cfg->m_DesignBlockChooserPanel.place_as_group ) )
+#else
                 if( isDrawSheetFromDesignBlock && cfg->m_DesignBlockChooserPanel.place_as_group )
+#endif
                 {
                     SCH_SCREEN* screen = m_frame->GetScreen();
 
@@ -3566,6 +3779,16 @@ int SCH_DRAWING_TOOLS::DrawSheet( const TOOL_EVENT& aEvent )
                     m_selectionTool->AddItemToSel( sheetGroup );
                 else
                     m_selectionTool->AddItemToSel( sheet );
+
+#ifdef __EMSCRIPTEN__
+                // K-B1: a host block is placed once; its options end with it.
+                if( isDrawSheetFromDesignBlock && s_ccBlockOptions )
+                {
+                    s_ccBlockOptions.reset();
+                    m_frame->PopTool( aEvent );
+                    break;
+                }
+#endif
 
                 if( ( isDrawSheetCopy || isDrawSheetFromDesignBlock )
                     && !cfg->m_DesignBlockChooserPanel.repeated_placement )

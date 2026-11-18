@@ -19,9 +19,19 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: under __EMSCRIPTEN__ ShowModal asks the host
+ * (host_prompt.h, ask offset, modal) and writes its answer through the dialog's own controls and
+ * TransferDataFromWindow; a plain build is unchanged.
  */
 
 #include "dialog_offset_item.h"
+
+#ifdef __EMSCRIPTEN__
+#include <cmath>
+#include <limits>
+#include <optional>
+#endif
 
 
 DIALOG_OFFSET_ITEM::DIALOG_OFFSET_ITEM( PCB_BASE_FRAME& aParent, VECTOR2I& aOffset ) :
@@ -198,3 +208,95 @@ bool DIALOG_OFFSET_ITEM::TransferDataFromWindow()
 
     return true;
 }
+
+
+#ifdef __EMSCRIPTEN__
+
+// The host prompt (host_prompt.h, ask "offset", modal), after the Interactive Offset tool's two
+// clicks. The record is the measured vector { x, y } in millimeters; the answer { x, y } (either
+// or both, closed) is written into the dialog's own controls as a Cartesian vector (the card
+// converts a polar entry) and its own TransferDataFromWindow gives the tool the offset.
+
+int DIALOG_OFFSET_ITEM::ShowModal()
+{
+    LoadControlState();
+    TransferDataToWindow();
+
+    nlohmann::json record;
+    record["x"] = pcbIUScale.IUTomm( m_originalOffset.x );
+    record["y"] = pcbIUScale.IUTomm( m_originalOffset.y );
+
+    class RECEIVER : public CC_PROMPT_RECEIVER
+    {
+    public:
+        explicit RECEIVER( DIALOG_OFFSET_ITEM* aDialog ) : m_dialog( aDialog ) {}
+
+        bool CcApply( const nlohmann::json& aAnswer, std::string& aField ) override
+        {
+            if( !aAnswer.is_object() )
+                return false;
+
+            std::optional<double> x, y;
+
+            for( auto it = aAnswer.begin(); it != aAnswer.end(); ++it )
+            {
+                const std::string& key = it.key();
+
+                if( key != "x" && key != "y" )
+                {
+                    aField = key;
+                    return false;
+                }
+
+                double iu = 0.0;
+
+                if( it->is_number() && std::isfinite( it->get<double>() ) )
+                    iu = std::round( pcbIUScale.mmToIU( it->get<double>() ) );
+
+                if( !it->is_number() || !std::isfinite( it->get<double>() )
+                        || std::fabs( iu ) > static_cast<double>( std::numeric_limits<int>::max() ) )
+                {
+                    aField = key;
+                    return false;
+                }
+
+                ( key == "x" ? x : y ) = iu;
+            }
+
+            // A polar entry is first turned back to the Cartesian fields (the Polar box
+            // cleared), then the answer is written over them.
+            if( m_dialog->m_polarCoords->GetValue() )
+            {
+                m_dialog->m_polarCoords->SetValue( false );
+                wxCommandEvent dummy;
+                m_dialog->OnPolarChanged( dummy );
+            }
+
+            if( x )
+                m_dialog->m_xOffset.SetDoubleValue( *x );
+
+            if( y )
+                m_dialog->m_yOffset.SetDoubleValue( *y );
+
+            if( !m_dialog->Validate() || !m_dialog->TransferDataFromWindow() )
+                return false;
+
+            m_dialog->SaveControlState();
+            return true;
+        }
+
+    private:
+        DIALOG_OFFSET_ITEM* m_dialog;
+    };
+
+    RECEIVER receiver( this );
+
+    switch( CcHostPromptModal( "offset", record, receiver ) )
+    {
+    case 1:  SetReturnCode( wxID_OK );     return wxID_OK;
+    case 0:  SetReturnCode( wxID_CANCEL ); return wxID_CANCEL;
+    default: return DIALOG_OFFSET_ITEM_BASE::ShowModal();
+    }
+}
+
+#endif // __EMSCRIPTEN__

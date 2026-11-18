@@ -20,6 +20,9 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: DIALOG_MOVE_EXACT asks the host (host_prompt.h,
+ * ask moveExact, modal) in its own ShowModal under __EMSCRIPTEN__; a plain build is unchanged.
  */
 
 #pragma once
@@ -30,6 +33,10 @@
 #include <widgets/unit_binder.h>
 
 #include <dialogs/dialog_move_exact_base.h>
+
+#ifdef __EMSCRIPTEN__
+#include <host_prompt.h>
+#endif
 
 
 class PCB_BASE_FRAME;
@@ -50,6 +57,12 @@ public:
     DIALOG_MOVE_EXACT( PCB_BASE_FRAME* aParent, VECTOR2I& aTranslate, EDA_ANGLE& aRotate,
                        ROTATION_ANCHOR& aAnchor, const BOX2I& aBbox );
     ~DIALOG_MOVE_EXACT() { };
+
+#ifdef __EMSCRIPTEN__
+    /// Asks the host first (host_prompt.h, ask moveExact, modal); KiCad's own window only when
+    /// nobody takes the ask.
+    int ShowModal() override;
+#endif
 
 private:
 

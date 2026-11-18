@@ -19,6 +19,9 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: the CSV text of Export Table to CSV, built once
+ * by CcTableCsvText for the in-browser editor's export (WebAssembly build only).
  */
 
 #ifndef EDIT_TABLE_TOOL_BASE_H
@@ -812,5 +815,48 @@ public:
 
     virtual T_TABLECELL* copyCell( T_TABLECELL* aSource ) = 0;
 };
+
+
+#ifdef __EMSCRIPTEN__
+/**
+ * The text Export Table to CSV writes (SCH_EDIT_TABLE_TOOL::ExportTableToCSV,
+ * PCB_EDIT_TABLE_TOOL::ExportTableToCSV), built the same way: every cell's shown text from
+ * \a aCellText, a field holding a comma, a quote or a newline wrapped in quotes with its quotes
+ * doubled, fields joined by commas, every row ended by a newline.
+ */
+template<typename T_TABLE, typename T_CELL_TEXT>
+wxString CcTableCsvText( T_TABLE* aTable, T_CELL_TEXT aCellText )
+{
+    auto escapeCSV = []( const wxString& field ) -> wxString
+    {
+        wxString escaped = field;
+
+        if( escaped.Contains( ',' ) || escaped.Contains( '\"' ) || escaped.Contains( '\n' ) )
+        {
+            escaped.Replace( "\"", "\"\"" );
+            escaped = "\"" + escaped + "\"";
+        }
+
+        return escaped;
+    };
+
+    wxString text;
+
+    for( int row = 0; row < aTable->GetRowCount(); ++row )
+    {
+        for( int col = 0; col < aTable->GetColCount(); ++col )
+        {
+            text << escapeCSV( aCellText( aTable->GetCell( row, col ) ) );
+
+            if( col < aTable->GetColCount() - 1 )
+                text << ',';
+        }
+
+        text << '\n';
+    }
+
+    return text;
+}
+#endif // __EMSCRIPTEN__
 
 #endif //EDIT_TABLE_TOOL_BASE_H
