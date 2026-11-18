@@ -4,6 +4,10 @@
  * Copyright (C) 2015-2020 Mario Luzeiro <mrluzeiro@ua.pt>
  * Copyright The KiCad Developers, see AUTHORS.txt for contributors.
  *
+ * Modified by Circuit Center Inc on 2026-11-18: in the WebAssembly build one tracing pass holds
+ * the main thread for at most 100 ms (KiCad's 400 or 750 ms elsewhere), so the render job's
+ * yield between passes comes before a browser's 200 ms long task line.
+ *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
  * as published by the Free Software Foundation; either version 2
@@ -256,7 +260,15 @@ void RENDER_3D_RAYTRACE_BASE::renderTracing( uint8_t* ptrPBO, REPORTER* aStatusR
     std::atomic<size_t> currentBlock( 0 );
 
     thread_pool& tp = GetKiCadThreadPool();
+#ifdef __EMSCRIPTEN__
+    // The WebAssembly build runs this on the browser's main thread, which waits for every
+    // worker's last block before the job yields to the page between passes; a pass ran to
+    // 392 to 414 ms on the 400 ms budget, so 100 ms keeps each pass well under the page's
+    // 200 ms line at a few more passes' cost.
+    const int timeLimit = 100;
+#else
     const int timeLimit = m_blockPositions.size() > 40000 ? 750 : 400;
+#endif
 
     auto processBlocks =
             [&]()
