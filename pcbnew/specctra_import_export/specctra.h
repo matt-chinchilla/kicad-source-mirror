@@ -20,6 +20,9 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: K-SES, under __EMSCRIPTEN__ a session read
+ * through a BOARD_COMMIT (one undo step) and counted before it is read.
  */
 
 #ifndef SPECCTRA_H_
@@ -48,6 +51,9 @@ class PCB_TRACK;
 class PCB_ARC;
 class PCB_VIA;
 class NETCLASS;
+#ifdef __EMSCRIPTEN__
+class BOARD_COMMIT;
+#endif
 class FOOTPRINT;
 class SHAPE_POLY_SET;
 
@@ -3704,6 +3710,25 @@ public:
      */
     void FromSESSION( BOARD* aBoard );
 
+#ifdef __EMSCRIPTEN__
+    /**
+     * FromSESSION with every change staged on aCommit (when not null): the old unlocked
+     * tracks, vias and the markers removed through it, each moved footprint modified through
+     * it and the new tracks and vias added through it, so the caller's Push is ONE undo step.
+     * On a throw nothing has touched the board; the caller reverts aCommit.
+     */
+    void FromSESSION( BOARD* aBoard, BOARD_COMMIT* aCommit );
+
+    /**
+     * Count what FromSESSION would make from the loaded #SESSION, changing nothing: the track
+     * and arc segments, the via instances, the distinct net names the routes name and those of
+     * them aBoard lacks. Throws the IO_ERROR FromSESSION would throw for a missing section, a
+     * placement reference aBoard lacks or a via padstack the session library lacks.
+     */
+    void CountSESSION( BOARD* aBoard, int& aTracks, int& aVias, std::vector<std::string>& aNets,
+                       std::vector<std::string>& aMissingNets );
+#endif
+
     /**
      * Write the internal #SESSION instance out as a #SPECTRA DSN format file.
      *
@@ -3966,6 +3991,19 @@ private:
  */
 
 bool ImportSpecctraSession( BOARD* aBoard, const wxString& fullFileName );
+
+#ifdef __EMSCRIPTEN__
+/**
+ * Load fullFileName and read it into aBoard through aCommit (FromSESSION's commit form). The
+ * caller pushes aCommit on success and reverts it on a throw, then rebuilds connectivity.
+ */
+void CcImportSpecctraSession( BOARD* aBoard, const wxString& fullFileName, BOARD_COMMIT* aCommit );
+
+/** Load fullFileName and count it against aBoard (CountSESSION), changing nothing. */
+void CcCountSpecctraSession( BOARD* aBoard, const wxString& fullFileName, int& aTracks, int& aVias,
+                             std::vector<std::string>& aNets,
+                             std::vector<std::string>& aMissingNets );
+#endif
 
 }           // namespace DSN
 
