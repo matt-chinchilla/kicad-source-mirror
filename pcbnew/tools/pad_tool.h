@@ -19,6 +19,10 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: under __EMSCRIPTEN__ PAD_TOOL declares
+ * enumerateLoop, the interactive loop of EnumeratePads split out so the WebAssembly editor
+ * can start it with the page's numbering in place of KiCad's dialog.
  */
 
 #pragma once
@@ -27,6 +31,9 @@
 
 class ACTION_MENU;
 class PCB_SHAPE;
+#ifdef __EMSCRIPTEN__
+struct SEQUENTIAL_PAD_ENUMERATION_PARAMS;
+#endif
 
 
 class PAD_TOOL : public PCB_TOOL_BASE
@@ -45,6 +52,14 @@ public:
      * Tool for quick pad enumeration.
      */
     int EnumeratePads( const TOOL_EVENT& aEvent );
+
+#ifdef __EMSCRIPTEN__
+    /**
+     * The interactive loop of EnumeratePads with its numbering already chosen (the page's
+     * numbers in the WebAssembly editor, in place of KiCad's dialog).
+     */
+    int enumerateLoop( const SEQUENTIAL_PAD_ENUMERATION_PARAMS& aParams );
+#endif
 
     int PadTable( const TOOL_EVENT& aEvent );
 
