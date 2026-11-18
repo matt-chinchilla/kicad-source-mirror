@@ -20,6 +20,10 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: K-SES, under __EMSCRIPTEN__ FromSESSION stages
+ * every change on an optional BOARD_COMMIT (the session read is one undo step) and
+ * CountSESSION counts a session before it is read.
  */
 
 
@@ -49,6 +53,12 @@
 #include <math/util.h>      // for KiROUND
 #include <pcbnew_settings.h>
 #include <string_utils.h>
+
+#ifdef __EMSCRIPTEN__
+#include <board_commit.h>
+#include <pcb_marker.h>
+#include <set>
+#endif
 
 using namespace DSN;
 
@@ -360,7 +370,17 @@ PCB_VIA* SPECCTRA_DB::makeVIA( WIRE_VIA* aVia, PADSTACK* aPadstack, const POINT&
 // no UI code in this function, throw exception to report problems to the
 // UI handler: void PCB_EDIT_FRAME::ImportSpecctraSession( wxCommandEvent& event )
 
+#ifdef __EMSCRIPTEN__
 void SPECCTRA_DB::FromSESSION( BOARD* aBoard )
+{
+    FromSESSION( aBoard, nullptr );
+}
+
+
+void SPECCTRA_DB::FromSESSION( BOARD* aBoard, BOARD_COMMIT* aCommit )
+#else
+void SPECCTRA_DB::FromSESSION( BOARD* aBoard )
+#endif
 {
     m_sessionBoard = aBoard;      // not owned here
 
@@ -375,6 +395,43 @@ void SPECCTRA_DB::FromSESSION( BOARD* aBoard )
 
     // delete the old tracks and vias but save locked tracks/vias; they will be re-added later
     std::vector<PCB_TRACK*> locked;
+#ifdef __EMSCRIPTEN__
+    if( aCommit )
+    {
+        // The locked tracks and vias stay where they are (nothing to re-add); the others and
+        // the markers leave through the commit, so its undo step brings them back.
+        for( PCB_TRACK* track : aBoard->Tracks() )
+        {
+            if( !track->IsLocked() )
+                aCommit->Remove( track );
+        }
+
+        for( PCB_MARKER* marker : aBoard->Markers() )
+            aCommit->Remove( marker );
+    }
+    else
+    {
+        TRACKS tracks = aBoard->Tracks();
+        aBoard->RemoveAll( { PCB_TRACE_T } );
+
+        for( PCB_TRACK* track : tracks )
+        {
+            if( track->IsLocked() )
+            {
+                locked.push_back( track );
+            }
+            else
+            {
+                if( EDA_GROUP* group = track->GetParentGroup() )
+                    group->RemoveItem( track );
+
+                delete track;
+            }
+        }
+
+        aBoard->DeleteMARKERs();
+    }
+#else
     TRACKS tracks = aBoard->Tracks();
     aBoard->RemoveAll( { PCB_TRACE_T } );
 
@@ -394,6 +451,7 @@ void SPECCTRA_DB::FromSESSION( BOARD* aBoard )
     }
 
     aBoard->DeleteMARKERs();
+#endif
 
     buildLayerMaps( aBoard );
 
@@ -421,6 +479,11 @@ void SPECCTRA_DB::FromSESSION( BOARD* aBoard )
 
                 if( !place.m_hasVertex )
                     continue;
+
+#ifdef __EMSCRIPTEN__
+                if( aCommit )
+                    aCommit->Modify( footprint );
+#endif
 
                 UNIT_RES* resolution = place.GetUnits();
                 wxASSERT( resolution );
@@ -493,6 +556,11 @@ void SPECCTRA_DB::FromSESSION( BOARD* aBoard )
                 {
                     PCB_TRACK* track;
                     track = makeTRACK( &wire, path, pt, netoutCode );
+#ifdef __EMSCRIPTEN__
+                    if( aCommit )
+                        aCommit->Add( track );
+                    else
+#endif
                     aBoard->Add( track );
                 }
             }
@@ -501,6 +569,11 @@ void SPECCTRA_DB::FromSESSION( BOARD* aBoard )
                 QARC* qarc = static_cast<QARC*>( wire.m_shape );
 
                 PCB_ARC* arc = makeARC( &wire, qarc, netoutCode );
+#ifdef __EMSCRIPTEN__
+                if( aCommit )
+                    aCommit->Add( arc );
+                else
+#endif
                 aBoard->Add( arc );
             }
             else
@@ -557,6 +630,11 @@ void SPECCTRA_DB::FromSESSION( BOARD* aBoard )
             for( unsigned v = 0; v < wire_via.m_vertexes.size(); ++v )
             {
                 PCB_VIA* via = makeVIA( &wire_via, padstack, wire_via.m_vertexes[v], netCode, via_drill_default );
+#ifdef __EMSCRIPTEN__
+                if( aCommit )
+                    aCommit->Add( via );
+                else
+#endif
                 aBoard->Add( via );
             }
         }
@@ -577,4 +655,109 @@ bool ImportSpecctraSession( BOARD* aBoard, const wxString& fullFileName )
 
     return true;
 }
+
+
+#ifdef __EMSCRIPTEN__
+void SPECCTRA_DB::CountSESSION( BOARD* aBoard, int& aTracks, int& aVias,
+                                std::vector<std::string>& aNets,
+                                std::vector<std::string>& aMissingNets )
+{
+    aTracks = 0;
+    aVias = 0;
+    aNets.clear();
+    aMissingNets.clear();
+
+    // The same refusals as FromSESSION, before anything is counted.
+    if( !m_session )
+        THROW_IO_ERROR( _("Session file is missing the \"session\" section") );
+
+    if( !m_session->route )
+        THROW_IO_ERROR( _("Session file is missing the \"routes\" section") );
+
+    if( !m_session->route->library )
+        THROW_IO_ERROR( _("Session file is missing the \"library_out\" section") );
+
+    if( m_session->placement )
+    {
+        for( COMPONENT& component : m_session->placement->m_components )
+        {
+            for( PLACE& place : component.m_places )
+            {
+                wxString reference = From_UTF8( place.m_component_id.c_str() );
+
+                if( !aBoard->FindFootprintByReference( reference ) )
+                    THROW_IO_ERROR( wxString::Format( _( "Reference '%s' not found." ), reference ) );
+            }
+        }
+    }
+
+    std::set<std::string> nets;
+    std::set<std::string> missing;
+
+    for( NET_OUT& net_out : m_session->route->net_outs )
+    {
+        if( net_out.net_id.size() && nets.insert( net_out.net_id ).second )
+        {
+            aNets.push_back( net_out.net_id );
+
+            if( !aBoard->FindNet( From_UTF8( net_out.net_id.c_str() ) )
+                    && missing.insert( net_out.net_id ).second )
+            {
+                aMissingNets.push_back( net_out.net_id );
+            }
+        }
+
+        for( WIRE& wire : net_out.wires )
+        {
+            DSN_T shape = wire.m_shape->Type();
+
+            if( shape == T_path )
+            {
+                PATH* path = static_cast<PATH*>( wire.m_shape );
+
+                if( path->points.size() > 1 )
+                    aTracks += (int) path->points.size() - 1;
+            }
+            else if( shape == T_qarc )
+            {
+                aTracks++;
+            }
+        }
+
+        for( WIRE_VIA& wire_via : net_out.wire_vias )
+        {
+            if( !m_session->route->library->FindPADSTACK( wire_via.GetPadstackId() ) )
+            {
+                wxString psid( From_UTF8( wire_via.GetPadstackId().c_str() ) );
+
+                THROW_IO_ERROR( wxString::Format( _( "A wire_via refers to missing padstack '%s'." ), psid ) );
+            }
+
+            aVias += (int) wire_via.m_vertexes.size();
+        }
+    }
+}
+
+
+void CcImportSpecctraSession( BOARD* aBoard, const wxString& fullFileName, BOARD_COMMIT* aCommit )
+{
+    SPECCTRA_DB db;
+    LOCALE_IO   toggle;
+
+    db.LoadSESSION( fullFileName );
+    db.FromSESSION( aBoard, aCommit );
+}
+
+
+void CcCountSpecctraSession( BOARD* aBoard, const wxString& fullFileName, int& aTracks, int& aVias,
+                             std::vector<std::string>& aNets,
+                             std::vector<std::string>& aMissingNets )
+{
+    SPECCTRA_DB db;
+    LOCALE_IO   toggle;
+
+    db.LoadSESSION( fullFileName );
+    db.CountSESSION( aBoard, aTracks, aVias, aNets, aMissingNets );
+}
+#endif
 } // namespace DSN
