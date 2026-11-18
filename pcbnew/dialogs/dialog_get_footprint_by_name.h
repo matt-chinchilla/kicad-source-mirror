@@ -20,6 +20,10 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: DIALOG_GET_FOOTPRINT_BY_NAME asks the host
+ * (host_prompt.h, ask findFootprint, modal) in its own ShowModal under __EMSCRIPTEN__; a plain
+ * build is unchanged.
  */
 
 #pragma once
@@ -27,6 +31,10 @@
 
 #include <dialog_get_footprint_by_name_base.h>
 #include <pcb_base_frame.h>
+
+#ifdef __EMSCRIPTEN__
+#include <host_prompt.h>
+#endif
 
 /**
  * DIALOG_GET_FOOTPRINT_BY_NAME is a helper dialog to select a footprint by its reference
@@ -40,6 +48,12 @@ public:
 
     // returns the selected text (fp reference)
     wxString GetValue() const;
+
+#ifdef __EMSCRIPTEN__
+    /// Asks the host first (host_prompt.h, ask findFootprint, modal); KiCad's own window only when
+    /// nobody takes the ask.
+    int ShowModal() override;
+#endif
 
 private:
     // Called when selecting an item from the item list

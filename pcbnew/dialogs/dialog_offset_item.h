@@ -19,12 +19,19 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: DIALOG_OFFSET_ITEM asks the host (host_prompt.h,
+ * ask offset, modal) in its own ShowModal under __EMSCRIPTEN__; a plain build is unchanged.
  */
 
 #include <dialogs/dialog_offset_item_base.h>
 
 #include <widgets/unit_binder.h>
 #include <pcb_base_frame.h>
+
+#ifdef __EMSCRIPTEN__
+#include <host_prompt.h>
+#endif
 
 /**
  * Dialog that invites the user to enter some kind of offset.
@@ -44,6 +51,12 @@ public:
 
     virtual bool TransferDataToWindow() override;
     virtual bool TransferDataFromWindow() override;
+
+#ifdef __EMSCRIPTEN__
+    /// Asks the host first (host_prompt.h, ask offset, modal); KiCad's own window only when
+    /// nobody takes the ask.
+    int ShowModal() override;
+#endif
 
 private:
     void updateDialogControls( bool aPolar );

@@ -20,6 +20,10 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: under __EMSCRIPTEN__ ShowModal asks the host
+ * (host_prompt.h, ask moveExact, modal) and writes its answer through the dialog's own controls
+ * and TransferDataFromWindow; a plain build is unchanged.
  */
 
 #include <dialogs/dialog_move_exact.h>
@@ -28,6 +32,12 @@
 #include <widgets/tab_traversal.h>
 #include <pcb_edit_frame.h>
 #include <trigo.h>
+
+#ifdef __EMSCRIPTEN__
+#include <cmath>
+#include <limits>
+#include <optional>
+#endif
 
 
 
@@ -303,3 +313,205 @@ void DIALOG_MOVE_EXACT::OnTextChanged( wxCommandEvent& event )
         event.Skip();
     }
 }
+
+
+#ifdef __EMSCRIPTEN__
+
+// The host prompt (host_prompt.h, ask "moveExact", modal). The record is what the dialog would
+// show: the move as a Cartesian vector (a polar entry turned to its Cartesian values, as
+// TransferDataFromWindow delivers it), the rotation and the rotation anchor with the anchors
+// it offers. The answer { x, y, rotation, anchor } (any subset, closed) is written into the
+// dialog's own controls and its own TransferDataFromWindow fills the caller's values.
+
+namespace
+{
+const char* ccMoveAnchorName( ROTATION_ANCHOR aAnchor )
+{
+    switch( aAnchor )
+    {
+    case ROTATE_AROUND_ITEM_ANCHOR: return "item";
+    case ROTATE_AROUND_SEL_CENTER:  return "selectionCenter";
+    case ROTATE_AROUND_USER_ORIGIN: return "userOrigin";
+    case ROTATE_AROUND_AUX_ORIGIN:  return "drillOrigin";
+    }
+
+    return "item";
+}
+
+
+// A millimeter answer in internal units, within the board's coordinate range.
+bool ccMoveLength( const nlohmann::json& aValue, double& aIU )
+{
+    if( !aValue.is_number() )
+        return false;
+
+    const double mm = aValue.get<double>();
+
+    if( !std::isfinite( mm ) )
+        return false;
+
+    aIU = std::round( pcbIUScale.mmToIU( mm ) );
+    return std::fabs( aIU ) <= static_cast<double>( std::numeric_limits<int>::max() );
+}
+} // namespace
+
+
+int DIALOG_MOVE_EXACT::ShowModal()
+{
+    // What showing the dialog would put in its controls: the saved control state, then its
+    // own TransferDataToWindow (the order of its init dialog event).
+    LoadControlState();
+    TransferDataToWindow();
+
+    wxRealPoint translation;
+    GetTranslationInIU( translation, m_polarCoords->IsChecked() );
+
+    nlohmann::json anchors = nlohmann::json::array();
+
+    for( ROTATION_ANCHOR anchorID : m_menuIDs )
+        anchors.push_back( ccMoveAnchorName( anchorID ) );
+
+    const int selection = m_anchorOptions->GetSelection();
+    const ROTATION_ANCHOR anchor = selection >= 0 && selection < (int) m_menuIDs.size()
+                                           ? m_menuIDs[selection]
+                                           : m_menuIDs.front();
+
+    nlohmann::json record;
+    record["x"] = pcbIUScale.IUTomm( translation.x );
+    record["y"] = pcbIUScale.IUTomm( translation.y );
+    record["rotation"] = m_rotate.GetAngleValue().AsDegrees();
+    record["anchor"] = ccMoveAnchorName( anchor );
+    record["anchors"] = anchors;
+
+    class RECEIVER : public CC_PROMPT_RECEIVER
+    {
+    public:
+        explicit RECEIVER( DIALOG_MOVE_EXACT* aDialog ) : m_dialog( aDialog ) {}
+
+        bool CcApply( const nlohmann::json& aAnswer, std::string& aField ) override
+        {
+            if( !aAnswer.is_object() )
+                return false;
+
+            // Read the whole answer first.
+            std::optional<double> x, y, rotation;
+            std::optional<int>    anchorIndex;
+
+            for( auto it = aAnswer.begin(); it != aAnswer.end(); ++it )
+            {
+                const std::string& key = it.key();
+
+                if( key == "x" || key == "y" )
+                {
+                    double iu = 0.0;
+
+                    if( !ccMoveLength( *it, iu ) )
+                    {
+                        aField = key;
+                        return false;
+                    }
+
+                    ( key == "x" ? x : y ) = iu;
+                }
+                else if( key == "rotation" )
+                {
+                    if( !it->is_number() || !std::isfinite( it->get<double>() )
+                            || std::fabs( it->get<double>() ) > 3600.0 )
+                    {
+                        aField = key;
+                        return false;
+                    }
+
+                    rotation = it->get<double>();
+                }
+                else if( key == "anchor" )
+                {
+                    if( it->is_string() )
+                    {
+                        for( size_t ii = 0; ii < m_dialog->m_menuIDs.size(); ++ii )
+                        {
+                            if( it->get<std::string>()
+                                    == ccMoveAnchorName( m_dialog->m_menuIDs[ii] ) )
+                            {
+                                anchorIndex = (int) ii;
+                                break;
+                            }
+                        }
+                    }
+
+                    if( !anchorIndex )
+                    {
+                        aField = key;
+                        return false;
+                    }
+                }
+                else
+                {
+                    aField = key;
+                    return false;
+                }
+            }
+
+            // The dialog delivers Cartesian only: a polar entry is first turned into its
+            // Cartesian values (the Polar box cleared), then the answer is written over them.
+            wxRealPoint current;
+            m_dialog->GetTranslationInIU( current, m_dialog->m_polarCoords->IsChecked() );
+
+            if( m_dialog->m_polarCoords->IsChecked() )
+            {
+                m_dialog->m_polarCoords->SetValue( false );
+                m_dialog->updateDialogControls( false );
+            }
+
+            const double moveX = x ? *x : current.x;
+            const double moveY = y ? *y : current.y;
+
+            // The bound KiCad's OnTextChanged enforces by disabling OK.
+            const BOX2I& bbox = m_dialog->m_bbox;
+            const double max_border = std::numeric_limits<int>::max() * M_SQRT1_2;
+
+            if( bbox.GetLeft() + moveX < -max_border || bbox.GetRight() + moveX > max_border
+                    || bbox.GetTop() + moveY < -max_border
+                    || bbox.GetBottom() + moveY > max_border )
+            {
+                aField = x ? "x" : "y";
+                CcPromptCaptureMessage( _( "Invalid movement values.  Movement would place "
+                                           "selection outside of the maximum board area." )
+                                                .ToStdString( wxConvUTF8 ) );
+                return false;
+            }
+
+            m_dialog->m_moveX.SetDoubleValue( moveX );
+            m_dialog->m_moveY.SetDoubleValue( moveY );
+            m_dialog->m_stateX = m_dialog->m_moveX.GetDoubleValue();
+            m_dialog->m_stateY = m_dialog->m_moveY.GetDoubleValue();
+
+            if( rotation )
+                m_dialog->m_rotate.SetAngleValue( EDA_ANGLE( *rotation, DEGREES_T ) );
+
+            if( anchorIndex )
+                m_dialog->m_anchorOptions->SetSelection( *anchorIndex );
+
+            if( !m_dialog->Validate() || !m_dialog->TransferDataFromWindow() )
+                return false;
+
+            // KiCad keeps the dialog's values for its next use when it closes.
+            m_dialog->SaveControlState();
+            return true;
+        }
+
+    private:
+        DIALOG_MOVE_EXACT* m_dialog;
+    };
+
+    RECEIVER receiver( this );
+
+    switch( CcHostPromptModal( "moveExact", record, receiver ) )
+    {
+    case 1:  SetReturnCode( wxID_OK );     return wxID_OK;
+    case 0:  SetReturnCode( wxID_CANCEL ); return wxID_CANCEL;
+    default: return DIALOG_MOVE_EXACT_BASE::ShowModal();
+    }
+}
+
+#endif // __EMSCRIPTEN__
