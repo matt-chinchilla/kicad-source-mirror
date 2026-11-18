@@ -22,6 +22,10 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: DispatchContextMenu offers the context menu to
+ * the in-browser editor's host (tool/host_context_menu.h) before KiCad's own popup, which shows
+ * only when the host does not take it (WebAssembly build only).
  */
 
 #include <core/kicad_algo.h>
@@ -51,6 +55,10 @@
 #include <tool/action_manager.h>
 
 #include <class_draw_panel_gal.h>
+
+#ifdef __EMSCRIPTEN__
+#include <tool/host_context_menu.h>
+#endif
 
 /// Struct describing the current execution state of a TOOL
 struct TOOL_MANAGER::TOOL_STATE
@@ -939,6 +947,17 @@ void TOOL_MANAGER::DispatchContextMenu( const TOOL_EVENT& aEvent )
             return;
     }
 
+#ifdef __EMSCRIPTEN__
+    // A context menu is already held by the in-browser editor's host (the engine is parked in
+    // it and the tick keeps dispatching): a new right click closes it, as a press outside
+    // KiCad's popup does, and opens nothing.
+    if( CcHostMenuParked() )
+    {
+        CcHostMenuCancelParked();
+        return;
+    }
+#endif
+
     for( TOOL_ID toolId : m_activeTools )
     {
         TOOL_STATE* st = m_toolIdIndex[toolId];
@@ -959,6 +978,10 @@ void TOOL_MANAGER::DispatchContextMenu( const TOOL_EVENT& aEvent )
 
         // Store the menu pointer in case it is changed by the TOOL when handling menu events
         ACTION_MENU* m = st->contextMenu;
+
+#ifdef __EMSCRIPTEN__
+        const bool clarify = st->contextMenuTrigger == CMENU_NOW;
+#endif
 
         if( st->contextMenuTrigger == CMENU_NOW )
             st->contextMenuTrigger = CMENU_OFF;
@@ -989,8 +1012,17 @@ void TOOL_MANAGER::DispatchContextMenu( const TOOL_EVENT& aEvent )
         m_menuOwner = toolId;
         m_menuActive = true;
 
+#ifdef __EMSCRIPTEN__
+        // K-MENU: the host draws the menu when it takes the model; KiCad's popup otherwise.
+        if( wxWindow* frame = dynamic_cast<wxWindow*>( m_frame ) )
+        {
+            if( !CcHostTakesMenu( *this, *menu, frame, st->theTool, clarify, m_menuCursor ) )
+                frame->PopupMenu( menu.get() );
+        }
+#else
         if( wxWindow* frame = dynamic_cast<wxWindow*>( m_frame ) )
             frame->PopupMenu( menu.get() );
+#endif
 
         // Warp the cursor if a menu item was selected
         if( menu->GetSelected() >= 0 )
