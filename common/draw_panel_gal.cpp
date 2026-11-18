@@ -23,6 +23,11 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: under __EMSCRIPTEN__, the drawing area and its
+ * GAL window erase to the drawing's own background color (the painter's render settings, the
+ * color the GAL clears to) instead of wx's default face color, so an empty drawing area never
+ * shows wx's beige before the GAL's first frame.
  */
 #include <eda_draw_frame.h>
 #include <kiface_base.h>
@@ -40,6 +45,8 @@
 #include <gal/graphics_abstraction_layer.h>
 #ifdef __EMSCRIPTEN__
 #include <gal/webgl/webgl_gal.h>
+#include <wx/brush.h>
+#include <wx/dc.h>
 #else
 #include <gal/opengl/opengl_gal.h>
 #endif
@@ -66,6 +73,36 @@
  * @ingroup trace_env_vars
  */
 static const wxChar traceDrawPanel[] = wxT( "KICAD_DRAW_PANEL" );
+
+
+#ifdef __EMSCRIPTEN__
+/**
+ * The erase of the drawing area and of its GAL window in the browser engine. wx's own erase
+ * fills an unhandled erase with the system face color (a beige by day), and the browser shows
+ * that fill wherever the GAL's WebGL canvas has drawn nothing yet: from the frame's first
+ * paint to the GAL's first frame, and on every empty drawing area. The fill here is the
+ * color the GAL clears to (the painter's background, from the color theme the frame loaded),
+ * so the empty area is the drawing's own background from the first paint on. Before a painter
+ * exists, wx's own erase runs as before.
+ */
+static void ccEraseToDrawingBackground( EDA_DRAW_PANEL_GAL* aPanel, wxEraseEvent& aEvent )
+{
+    KIGFX::VIEW*    view = aPanel->GetView();
+    KIGFX::PAINTER* painter = view ? view->GetPainter() : nullptr;
+    wxDC*           dc = aEvent.GetDC();
+
+    if( !dc || !painter || !painter->GetSettings() )
+    {
+        aEvent.Skip();
+        return;
+    }
+
+    const KIGFX::COLOR4D bg = painter->GetSettings()->GetBackgroundColor().WithAlpha( 1.0 );
+
+    dc->SetBackground( wxBrush( bg.ToColour() ) );
+    dc->Clear();
+}
+#endif
 
 
 EDA_DRAW_PANEL_GAL::EDA_DRAW_PANEL_GAL( wxWindow* aParentWindow, wxWindowID aWindowId,
@@ -121,6 +158,15 @@ EDA_DRAW_PANEL_GAL::EDA_DRAW_PANEL_GAL( wxWindow* aParentWindow, wxWindowID aWin
 
     SwitchBackend( aGalType );
     SetBackgroundStyle( wxBG_STYLE_CUSTOM );
+
+#ifdef __EMSCRIPTEN__
+    // The empty drawing area in the drawing's background color, never wx's face color.
+    Bind( wxEVT_ERASE_BACKGROUND,
+          [this]( wxEraseEvent& aEvent )
+          {
+              ccEraseToDrawingBackground( this, aEvent );
+          } );
+#endif
 
     EnableScrolling( false, false ); // otherwise Zoom Auto disables GAL canvas
     KIPLATFORM::UI::SetOverlayScrolling( this, false ); // Prevent excessive repaint on GTK
@@ -686,6 +732,18 @@ bool EDA_DRAW_PANEL_GAL::SwitchBackend( GAL_TYPE aGalType )
 
     delete m_gal;
     m_gal = new_gal;
+
+#ifdef __EMSCRIPTEN__
+    // The GAL's own window (WEBGL_GAL is a wxGLCanvas) erases as the drawing area does.
+    if( wxWindow* galWindow = dynamic_cast<wxWindow*>( m_gal ) )
+    {
+        galWindow->Bind( wxEVT_ERASE_BACKGROUND,
+                         [this]( wxEraseEvent& aEvent )
+                         {
+                             ccEraseToDrawingBackground( this, aEvent );
+                         } );
+    }
+#endif
 
     wxSize clientSize = GetClientSize();
     clientSize.x = std::max( 10, clientSize.x );
