@@ -3,6 +3,10 @@
  *
  * Copyright (C) 2019-2023 CERN
  * Copyright The KiCad Developers, see AUTHORS.txt for contributors.
+ * Modified by Circuit Center Inc on 2026-11-18: a new label, text, text box, sheet or picture
+ * asks the in-browser editor's host (window.kicadHostSchItem) before KiCad's dialog or file
+ * box, and goes down as that dialog's OK would place it when the host holds the request
+ * (under __EMSCRIPTEN__).
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -76,6 +80,10 @@
 #include <wildcards_and_files_ext.h>
 #include <wx/filedlg.h>
 #include <wx/msgdlg.h>
+
+#ifdef __EMSCRIPTEN__
+#include <tools/sch_item_host.h>
+#endif
 
 
 namespace
@@ -1278,6 +1286,18 @@ int SCH_DRAWING_TOOLS::PlaceImage( const TOOL_EVENT& aEvent )
             {
                 m_toolMgr->RunAction( ACTIONS::selectionClear );
 
+#ifdef __EMSCRIPTEN__
+                // The host chooses the picture with its own file chooser and places it through
+                // this tool with the image as its parameter (kicadSchPlaceImage): the tool ends
+                // here, so that placement finds it free.
+                if( CcAskHostSchItem( "image", niluuid, m_frame->GetCurrentSheet().PathAsString(),
+                                      true ) )
+                {
+                    m_frame->PopTool( aEvent );
+                    break;
+                }
+#endif
+
                 wxFileDialog dlg( m_frame, _( "Choose Image" ), m_mruPath, wxEmptyString,
                                   FILEEXT::ImageFileWildcard(), wxFD_OPEN );
 
@@ -1956,6 +1976,15 @@ bool SCH_DRAWING_TOOLS::createNewLabel( const VECTOR2I& aPosition, int aType,
         // Auto-create from attached wire
         labelItem->SetText( netName );
     }
+#ifdef __EMSCRIPTEN__
+    else if( CcAskHostSchItem( "label", labelItem->m_Uuid,
+                               m_frame->GetCurrentSheet().PathAsString(), true ) )
+    {
+        // The host's form edits the label once placed: it goes down with the name KiCad's
+        // repeat would give it (the last label of its kind incremented), else "Label".
+        labelItem->SetText( CcProposedLabelText( m_frame->GetScreen(), labelItem->Type() ) );
+    }
+#endif
     else
     {
         DIALOG_LABEL_PROPERTIES dlg( m_frame, labelItem, true );
@@ -2015,6 +2044,25 @@ SCH_TEXT* SCH_DRAWING_TOOLS::createNewText( const VECTOR2I& aPosition )
     textItem->SetTextAngle( m_lastTextAngle );
     textItem->SetFlags( IS_NEW | IS_MOVING );
 
+#ifdef __EMSCRIPTEN__
+    // The host's form edits the text once placed (it opens with the text field focused).
+    if( CcAskHostSchItem( "text", textItem->m_Uuid, m_frame->GetCurrentSheet().PathAsString(),
+                          true ) )
+    {
+        textItem->SetText( wxT( "Text" ) );
+    }
+    else
+    {
+        DIALOG_TEXT_PROPERTIES dlg( m_frame, textItem );
+
+        // QuasiModal required for syntax help and Scintilla auto-complete
+        if( dlg.ShowQuasiModal() != wxID_OK )
+        {
+            delete textItem;
+            return nullptr;
+        }
+    }
+#else
     DIALOG_TEXT_PROPERTIES dlg( m_frame, textItem );
 
     // QuasiModal required for syntax help and Scintilla auto-complete
@@ -2023,6 +2071,7 @@ SCH_TEXT* SCH_DRAWING_TOOLS::createNewText( const VECTOR2I& aPosition )
         delete textItem;
         return nullptr;
     }
+#endif
 
     m_lastTextBold = textItem->IsBold();
     m_lastTextItalic = textItem->IsItalic();
@@ -2722,6 +2771,25 @@ int SCH_DRAWING_TOOLS::DrawShape( const TOOL_EVENT& aEvent )
                 if( isTextBox )
                 {
                     SCH_TEXTBOX*           textbox = static_cast<SCH_TEXTBOX*>( item );
+#ifdef __EMSCRIPTEN__
+                    getViewControls()->SetAutoPan( false );
+                    getViewControls()->CaptureCursor( false );
+
+                    // The host's form edits the text box once drawn; it goes down empty, as
+                    // KiCad's dialog's OK with nothing typed leaves it.
+                    if( !CcAskHostSchItem( "textbox", textbox->m_Uuid,
+                                           m_frame->GetCurrentSheet().PathAsString(), true ) )
+                    {
+                        DIALOG_TEXT_PROPERTIES dlg( m_frame, textbox );
+
+                        // QuasiModal required for syntax help and Scintilla auto-complete
+                        if( dlg.ShowQuasiModal() != wxID_OK )
+                        {
+                            cleanup();
+                            continue;
+                        }
+                    }
+#else
                     DIALOG_TEXT_PROPERTIES dlg( m_frame, textbox );
 
                     getViewControls()->SetAutoPan( false );
@@ -2733,6 +2801,7 @@ int SCH_DRAWING_TOOLS::DrawShape( const TOOL_EVENT& aEvent )
                         cleanup();
                         continue;
                     }
+#endif
 
                     m_lastTextBold = textbox->IsBold();
                     m_lastTextItalic = textbox->IsItalic();
@@ -3491,8 +3560,37 @@ int SCH_DRAWING_TOOLS::DrawSheet( const TOOL_EVENT& aEvent )
             getViewControls()->SetAutoPan( false );
             getViewControls()->CaptureCursor( false );
 
+#ifdef __EMSCRIPTEN__
+            bool sheetTaken = false;
+
+            // The host's form edits the sheet once drawn: it goes down as KiCad's sheet dialog's
+            // OK would leave it, its name as made above and its file the first free one of that
+            // name (ccNextSheetFileName), made through ChangeSheetFile's steps with no message box.
+            if( CcAskHostSchItem( "sheet", sheet->m_Uuid, m_frame->GetCurrentSheet().PathAsString(),
+                                  true ) )
+            {
+                const wxString file = ccNextSheetFileName( m_frame, sheet->GetFileName() );
+                bool           clearAnnotation = false;
+
+                sheetTaken = ccChangeSheetFile( m_frame, sheet, m_frame->GetCurrentSheet(), file,
+                                                CC_SHEET_FILE_MODE::RENAME, &clearAnnotation,
+                                                nullptr, &filename, nullptr );
+
+                if( sheetTaken )
+                    sheet->SetFileName( file );
+            }
+            else
+            {
+                sheetTaken = m_frame->EditSheetProperties( static_cast<SCH_SHEET*>( sheet ),
+                                                           &m_frame->GetCurrentSheet(), nullptr,
+                                                           nullptr, nullptr, &filename );
+            }
+
+            if( sheetTaken )
+#else
             if( m_frame->EditSheetProperties( static_cast<SCH_SHEET*>( sheet ), &m_frame->GetCurrentSheet(),
                                               nullptr, nullptr, nullptr, &filename ) )
+#endif
             {
                 m_view->ClearPreview();
 
