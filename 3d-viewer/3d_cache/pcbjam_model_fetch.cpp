@@ -15,6 +15,10 @@
  *
  * You should have received a copy of the GNU General Public License along
  * with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: FindStagedModel resolves a design's own model
+ * files (a ${KIPRJMOD} or $(KIPRJMOD) reference, or a relative path) under the staged kiprjmod
+ * folder (WebAssembly build only).
  */
 
 #include <cstdio>
@@ -244,8 +248,125 @@ wxString PCBJAM_3D::NormalizeModelRef( const wxString& aModelRef )
 }
 
 
+#ifdef __EMSCRIPTEN__
+// K-3D1 (engine run 15): where the page stages the design's own model files for an export,
+// under MODELS_MEMFS_ROOT (the island's bridge/occModels.ts uses the same name).
+static constexpr char CC_KIPRJMOD_STAGE[] = "kiprjmod";
+
+// A design reference's path inside the project folder, by the page's rule (designModelPath.ts):
+// "${KIPRJMOD}/<path>" or "$(KIPRJMOD)/<path>", or a relative path (no variable, not absolute,
+// no URI, not a ":NAME:" alias). aIsProject says the reference is one of those; the answer is
+// the path with "." segments dropped and ".." taken back, "" when a ".." leaves the project.
+static wxString ccProjectModelRel( const wxString& aModelRef, bool& aIsProject, bool& aKiprjmod )
+{
+    aIsProject = false;
+    aKiprjmod = false;
+
+    wxString ref = aModelRef;
+    ref.Trim( true ).Trim( false );
+    ref.Replace( wxT( "\\" ), wxT( "/" ) );
+
+    if( ref.empty() )
+        return wxEmptyString;
+
+    if( ref.StartsWith( wxT( "${KIPRJMOD}" ) ) || ref.StartsWith( wxT( "$(KIPRJMOD)" ) ) )
+    {
+        aKiprjmod = true;
+        ref = ref.Mid( 11 );
+    }
+    else if( ref.StartsWith( wxT( "$" ) ) || ref.StartsWith( wxT( "/" ) )
+             || ref.StartsWith( wxT( ":" ) ) || ref.Contains( wxT( "://" ) )
+             || ( ref.length() > 1 && ref[1] == ':' ) )
+    {
+        return wxEmptyString;
+    }
+
+    aIsProject = true;
+
+    std::vector<wxString> parts;
+    wxString              rest = ref;
+
+    while( !rest.empty() )
+    {
+        const int      slash = rest.Find( '/' );
+        const wxString part = slash == wxNOT_FOUND ? rest : rest.Mid( 0, slash );
+
+        rest = slash == wxNOT_FOUND ? wxString() : rest.Mid( slash + 1 );
+
+        if( part.empty() || part == wxT( "." ) )
+            continue;
+
+        if( part == wxT( ".." ) )
+        {
+            if( parts.empty() )
+                return wxEmptyString;
+
+            parts.pop_back();
+            continue;
+        }
+
+        parts.push_back( part );
+    }
+
+    wxString out;
+
+    for( const wxString& part : parts )
+    {
+        if( !out.empty() )
+            out += wxT( "/" );
+
+        out += part;
+    }
+
+    return out;
+}
+#endif // __EMSCRIPTEN__
+
+
 wxString PCBJAM_3D::FindStagedModel( const wxString& aModelRef )
 {
+#ifdef __EMSCRIPTEN__
+    // K-3D1: the design's own file, staged under <root>/kiprjmod/. A ${KIPRJMOD} reference
+    // resolves there or nowhere; a relative one there first, then as a library reference.
+    bool           isProject = false;
+    bool           kiprjmod = false;
+    const wxString projectRel = ccProjectModelRel( aModelRef, isProject, kiprjmod );
+
+    if( isProject )
+    {
+        if( !projectRel.empty() )
+        {
+            const wxString base = wxString::FromUTF8( MODELS_MEMFS_ROOT ) + wxT( "/" )
+                                  + wxString::FromUTF8( CC_KIPRJMOD_STAGE ) + wxT( "/" );
+
+            // The line as written, then for a VRML line only its STEP of the same name (the
+            // page's rule, KiCad's STEP export's substitution); a STEP line never takes a VRML.
+            std::vector<wxString> projectCandidates{ projectRel };
+            const int             pdot = projectRel.Find( '.', /* fromEnd */ true );
+
+            if( pdot != wxNOT_FOUND )
+            {
+                const wxString ext = projectRel.Mid( pdot ).Lower();
+
+                if( ext == wxT( ".wrl" ) || ext == wxT( ".wrz" ) )
+                {
+                    projectCandidates.push_back( projectRel.Mid( 0, pdot ) + wxT( ".stp" ) );
+                    projectCandidates.push_back( projectRel.Mid( 0, pdot ) + wxT( ".step" ) );
+                }
+            }
+
+            for( const wxString& candidate : projectCandidates )
+            {
+                if( wxFileName::FileExists( base + candidate ) )
+                    return base + candidate;
+            }
+        }
+
+        if( kiprjmod || projectRel.empty() )
+            return wxEmptyString;
+    }
+#endif
+
     const wxString rel = NormalizeModelRef( aModelRef );
 
     if( rel.empty() )
