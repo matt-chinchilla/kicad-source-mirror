@@ -19,6 +19,9 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: DIALOG_TABLECELL_PROPERTIES declares a ShowModal
+ * and a ShowQuasiModal that ask the in-browser editor's host first (WebAssembly build only).
  */
 
 #ifndef DIALOG_TABLECELL_PROPERTIES_H
@@ -51,7 +54,22 @@ public:
     ///< @return the value depending on the way the dialog was closed.
     enum TABLECELL_PROPS_RETVALUE GetReturnValue() { return m_returnValue; }
 
+#ifdef __EMSCRIPTEN__
+    /// Ask the in-browser editor's host first (host_prompt.h, ask "tableCell"); KiCad's dialog
+    /// only when the host does not take it.
+    int ShowModal() override;
+    int ShowQuasiModal();
+#endif
+
 private:
+#ifdef __EMSCRIPTEN__
+    /// 1 answered, 0 canceled, -1 not taken (CcHostPromptModal).
+    int ccAskHost();
+
+    /// Set by the host's answer: several cells keep their own text (no text was given).
+    bool m_ccKeepText = false;
+#endif
+
     void getContextualTextVars( const wxString& aCrossRef, wxArrayString* aTokens );
     void onMultiLineTCLostFocus( wxFocusEvent& event ) override;
 

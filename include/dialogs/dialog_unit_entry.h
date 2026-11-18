@@ -20,6 +20,9 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: WX_UNIT_ENTRY_DIALOG and WX_PT_ENTRY_DIALOG
+ * declare a ShowModal that asks the in-browser editor's host first (WebAssembly build only).
  */
 
 #pragma once
@@ -43,6 +46,12 @@ public:
      */
     int GetValue();
 
+#ifdef __EMSCRIPTEN__
+    /// Asks the in-browser editor's host first (host_prompt.h, ask "entry"); KiCad's dialog
+    /// only when the host does not take it.
+    int ShowModal() override;
+#endif
+
 private:
     UNIT_BINDER m_unit_binder;
 };
@@ -60,6 +69,11 @@ public:
     VECTOR2I GetValue();
 
 	void ResetValues( wxCommandEvent& event ) override;
+
+#ifdef __EMSCRIPTEN__
+    /// Asks the in-browser editor's host first (host_prompt.h, ask "entry", field "point").
+    int ShowModal() override;
+#endif
 
 private:
     UNIT_BINDER m_unit_binder_x;

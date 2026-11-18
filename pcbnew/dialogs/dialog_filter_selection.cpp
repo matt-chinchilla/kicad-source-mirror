@@ -19,10 +19,19 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: under __EMSCRIPTEN__ ShowModal asks the host
+ * (host_prompt.h, ask filterSelection, modal) and writes its answer through the dialog's own
+ * check boxes and TransferDataFromWindow; a plain build is unchanged.
  */
 
 #include <dialog_filter_selection.h>
 #include <pcb_edit_frame.h>
+
+#ifdef __EMSCRIPTEN__
+#include <utility>
+#include <vector>
+#endif
 
 
 DIALOG_FILTER_SELECTION::DIALOG_FILTER_SELECTION( PCB_BASE_FRAME* aParent, OPTIONS& aOptions ) :
@@ -175,3 +184,92 @@ bool DIALOG_FILTER_SELECTION::TransferDataFromWindow()
 
     return true;
 }
+
+
+#ifdef __EMSCRIPTEN__
+
+// The host prompt (host_prompt.h, ask "filterSelection", modal). The record is the options the
+// dialog would show; the answer (any subset of the same keys, each a boolean, closed) is written
+// into the dialog's own check boxes and its own TransferDataFromWindow fills the options.
+
+int DIALOG_FILTER_SELECTION::ShowModal()
+{
+    LoadControlState();
+    TransferDataToWindow();
+
+    const std::vector<std::pair<const char*, wxCheckBox*>> boxes = {
+        { "includeFootprints",        m_Include_Modules },
+        { "includeLockedFootprints",  m_IncludeLockedModules },
+        { "includeTracks",            m_Include_Tracks },
+        { "includeVias",              m_Include_Vias },
+        { "includeZones",             m_Include_Zones },
+        { "includeItemsOnTechLayers", m_Include_Draw_Items },
+        { "includeBoardOutlineLayer", m_Include_Edges_Items },
+        { "includePcbTexts",          m_Include_PcbTexts } };
+
+    nlohmann::json record = nlohmann::json::object();
+
+    for( const auto& [key, box] : boxes )
+        record[key] = box->GetValue();
+
+    class RECEIVER : public CC_PROMPT_RECEIVER
+    {
+    public:
+        RECEIVER( DIALOG_FILTER_SELECTION* aDialog,
+                  const std::vector<std::pair<const char*, wxCheckBox*>>& aBoxes ) :
+                m_dialog( aDialog ), m_boxes( aBoxes )
+        {
+        }
+
+        bool CcApply( const nlohmann::json& aAnswer, std::string& aField ) override
+        {
+            if( !aAnswer.is_object() )
+                return false;
+
+            std::vector<std::pair<wxCheckBox*, bool>> values;
+
+            for( auto it = aAnswer.begin(); it != aAnswer.end(); ++it )
+            {
+                wxCheckBox* box = nullptr;
+
+                for( const auto& [key, candidate] : m_boxes )
+                {
+                    if( it.key() == key )
+                        box = candidate;
+                }
+
+                if( !box || !it->is_boolean() )
+                {
+                    aField = it.key();
+                    return false;
+                }
+
+                values.emplace_back( box, it->get<bool>() );
+            }
+
+            for( const auto& [box, value] : values )
+                box->SetValue( value );
+
+            // What a click on a box does: the locked footprints box follows the footprints box.
+            wxCommandEvent dummy;
+            m_dialog->checkBoxClicked( dummy );
+
+            return m_dialog->Validate() && m_dialog->TransferDataFromWindow();
+        }
+
+    private:
+        DIALOG_FILTER_SELECTION*                                m_dialog;
+        const std::vector<std::pair<const char*, wxCheckBox*>>& m_boxes;
+    };
+
+    RECEIVER receiver( this, boxes );
+
+    switch( CcHostPromptModal( "filterSelection", record, receiver ) )
+    {
+    case 1:  SetReturnCode( wxID_OK );     return wxID_OK;
+    case 0:  SetReturnCode( wxID_CANCEL ); return wxID_CANCEL;
+    default: return DIALOG_FILTER_SELECTION_BASE::ShowModal();
+    }
+}
+
+#endif // __EMSCRIPTEN__

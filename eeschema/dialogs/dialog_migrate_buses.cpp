@@ -17,6 +17,10 @@
  *
  * You should have received a copy of the GNU General Public License along
  * with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: K-MIGRATE, the proposal rule of
+ * getProposedLabels lifted into the free function ccProposedBusLabels in the WebAssembly
+ * build, so the host reads KiCad's proposals with no dialog.
  */
 
 #include <sch_connection.h>
@@ -132,6 +136,56 @@ void DIALOG_MIGRATE_BUSES::updateUi()
 }
 
 
+#ifdef __EMSCRIPTEN__
+/**
+ * The new names KiCad proposes for one bus carrying aLabelList (getProposedLabels' rule): each
+ * label's prefix with the vector notation that spans every label, highest end first.
+ */
+std::vector<wxString> ccProposedBusLabels( CONNECTION_GRAPH* aGraph,
+                                           const std::vector<wxString>& aLabelList )
+{
+    int lowest_start = INT_MAX;
+    int highest_end = -1;
+    int widest_bus = -1;
+
+    SCH_CONNECTION conn( aGraph );
+
+    for( const wxString& label : aLabelList )
+    {
+        conn.ConfigureFromLabel( label );
+
+        int start = conn.VectorStart();
+        int end = conn.VectorEnd();
+
+        if( start < lowest_start )
+            lowest_start = start;
+
+        if( end > highest_end )
+            highest_end = end;
+
+        if( end - start + 1 > widest_bus )
+            widest_bus = end - start + 1;
+    }
+
+    std::vector<wxString> proposals;
+
+    for( const wxString& label : aLabelList )
+    {
+        conn.ConfigureFromLabel( label );
+        wxString proposal = conn.VectorPrefix();
+        proposal << "[" << highest_end << ".." << lowest_start << "]";
+        proposals.push_back( proposal );
+    }
+
+    return proposals;
+}
+
+
+std::vector<wxString> DIALOG_MIGRATE_BUSES::getProposedLabels( const std::vector<wxString>& aLabelList )
+{
+    return ccProposedBusLabels( m_frame->Schematic().ConnectionGraph(), aLabelList );
+}
+#else
 std::vector<wxString> DIALOG_MIGRATE_BUSES::getProposedLabels( const std::vector<wxString>& aLabelList )
 {
     int lowest_start = INT_MAX;
@@ -169,6 +223,7 @@ std::vector<wxString> DIALOG_MIGRATE_BUSES::getProposedLabels( const std::vector
 
     return proposals;
 }
+#endif
 
 
 void DIALOG_MIGRATE_BUSES::onItemSelected( wxListEvent& aEvent )

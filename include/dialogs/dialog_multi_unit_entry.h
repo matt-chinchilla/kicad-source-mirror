@@ -19,6 +19,9 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: WX_MULTI_ENTRY_DIALOG declares a ShowModal that
+ * asks the in-browser editor's host first (WebAssembly build only).
  */
 
 #pragma once
@@ -86,6 +89,12 @@ public:
      * for the ENTRY that defined this value.
      */
     std::vector<RESULT> GetValues() const;
+
+#ifdef __EMSCRIPTEN__
+    /// Asks the in-browser editor's host first (host_prompt.h, ask "entry", fields f0, f1 and
+    /// on); KiCad's dialog only when the host does not take it.
+    int ShowModal() override;
+#endif
 
 private:
     std::vector<ENTRY> m_entries;

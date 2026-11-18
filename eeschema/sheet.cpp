@@ -3,6 +3,8 @@
  *
  * Copyright (C) 2015 Jean-Pierre Charras, jp.charras at wanadoo.fr
  * Copyright The KiCad Developers, see AUTHORS.txt for contributors.
+ * Modified by Circuit Center Inc on 2026-11-18: ccChangeSheetFile and ccNextSheetFileName,
+ * ChangeSheetFile with no message box for the in-browser editor (under __EMSCRIPTEN__).
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -57,6 +59,10 @@
 #include <libraries/symbol_library_adapter.h>
 
 #include "printing/sch_printout.h"
+
+#ifdef __EMSCRIPTEN__
+#include <tools/sch_item_host.h>
+#endif
 
 
 bool SCH_EDIT_FRAME::CheckSheetForRecursion( SCH_SHEET* aSheet, SCH_SHEET_PATH* aCurrentSheet )
@@ -405,6 +411,253 @@ bool SCH_EDIT_FRAME::ChangeSheetFile( SCH_SHEET* aSheet, const wxString& aNewFil
 
     return true;
 }
+
+
+#ifdef __EMSCRIPTEN__
+// K-SHEETFILE (engine run 15): ChangeSheetFile's steps with every question answered by aMode
+// and every error a word, for the page's sheet form (kicadSchItemSet) and a new sheet the
+// host holds (SCH_DRAWING_TOOLS::DrawSheet). No message box on any road.
+bool ccChangeSheetFile( SCH_EDIT_FRAME* aFrame, SCH_SHEET* aSheet, SCH_SHEET_PATH& aCurrentSheet,
+                        const wxString& aNewFilename, CC_SHEET_FILE_MODE aMode,
+                        bool* aClearAnnotationNewItems, bool* aIsUndoable,
+                        const wxString* aSourceSheetFilename, wxString* aError )
+{
+    auto fail =
+            [&]( const char* aWord )
+            {
+                if( aError )
+                    *aError = wxString::FromUTF8( aWord );
+
+                return false;
+            };
+
+    if( !aFrame || !aSheet )
+        return fail( "args" );
+
+    wxFileName  sheetFileName( aNewFilename );
+    SCHEMATIC&  schematic = aFrame->Schematic();
+    SCH_SCREEN* currentScreen = aCurrentSheet.LastScreen();
+
+    if( !currentScreen )
+        return fail( "args" );
+
+    // SCH_SCREEN file names are always absolute.
+    wxFileName currentScreenFileName = currentScreen->GetFileName();
+    wxFileName screenFileName( sheetFileName );
+
+    if( !screenFileName.Normalize( FN_NORMALIZE_FLAGS | wxPATH_NORM_ENV_VARS,
+                                   currentScreenFileName.GetPath() ) )
+    {
+        return fail( "normalize" );
+    }
+
+    wxString newAbsoluteFilename = screenFileName.GetFullPath();
+    newAbsoluteFilename.Replace( wxT( "\\" ), wxT( "/" ) );
+
+    // AllowCaseSensitiveFileNameClashes' test, refused in place of its question.
+    {
+        wxString oldLower = wxFileName( aSheet->GetFileName() ).GetFullName().Lower();
+        wxString newLower = screenFileName.GetFullName().Lower();
+        size_t   count = 0;
+
+        for( const SCH_SHEET_PATH& path : schematic.Hierarchy() )
+        {
+            wxFileName lhs = path.LastScreen()->GetFileName();
+
+            if( lhs.GetPath() != screenFileName.GetPath() )
+                continue;
+
+            if( lhs.GetFullName().Lower() == newLower
+                    && lhs.GetFullName() != screenFileName.GetFullName() )
+            {
+                count++;
+            }
+        }
+
+        if( oldLower == newLower ? count > 1 : count > 0 )
+            return fail( "case_clash" );
+    }
+
+    SCH_SHEET_LIST fullHierarchy = schematic.Hierarchy();
+
+    bool        renameFile = false;
+    bool        loadFromFile = false;
+    bool        clearAnnotation = false;
+    bool        isExistingSheet = false;
+    SCH_SCREEN* useScreen = nullptr;
+    SCH_SCREEN* oldScreen = nullptr;
+
+    if( !schematic.Root().SearchHierarchy( newAbsoluteFilename, &useScreen ) )
+        loadFromFile = wxFileExists( newAbsoluteFilename );
+
+    if( aSheet->GetScreen() == nullptr )
+    {
+        if( useScreen || loadFromFile )
+        {
+            // KiCad asks "Link to this file?": the page answered before it sent.
+            if( aMode != CC_SHEET_FILE_MODE::USE_EXISTING )
+                return fail( "exists" );
+
+            clearAnnotation = true;
+        }
+        else if( aSourceSheetFilename && !aSourceSheetFilename->IsEmpty() )
+        {
+            loadFromFile = true;
+
+            if( !wxCopyFile( *aSourceSheetFilename, newAbsoluteFilename, false ) )
+                return fail( "copy" );
+        }
+        else
+        {
+            aFrame->InitSheet( aSheet, newAbsoluteFilename );
+        }
+    }
+    else
+    {
+        isExistingSheet = true;
+
+        wxString oldAbsoluteFilename = aSheet->GetScreen()->GetFileName();
+        oldAbsoluteFilename.Replace( wxT( "\\" ), wxT( "/" ) );
+
+        if( newAbsoluteFilename.Cmp( oldAbsoluteFilename ) != 0 )
+        {
+            if( aIsUndoable )
+                *aIsUndoable = false;
+
+            if( ( useScreen || loadFromFile ) && aMode == CC_SHEET_FILE_MODE::USE_EXISTING )
+            {
+                // KiCad's "Change the link?" answered yes.
+                clearAnnotation = true;
+                oldScreen = aSheet->GetScreen();
+
+                if( loadFromFile )
+                    aSheet->SetScreen( nullptr );
+            }
+            else if( useScreen )
+            {
+                // Saving over a file another sheet of the design shows is never an answer.
+                return fail( "in_use" );
+            }
+            else
+            {
+                // Save the current content under the new name (KiCad's "Create new file?"
+                // answered yes; over a file on disk only when the page chose it).
+                loadFromFile = false;
+                renameFile = true;
+            }
+        }
+
+        if( renameFile )
+        {
+            IO_RELEASER<SCH_IO> pi( SCH_IO_MGR::FindPlugin( SCH_IO_MGR::SCH_KICAD ) );
+
+            if( aSheet->GetScreenCount() <= 1 )
+                aSheet->GetScreen()->SetFileName( newAbsoluteFilename );
+
+            try
+            {
+                pi->SaveSchematicFile( newAbsoluteFilename, aSheet, &schematic );
+            }
+            catch( const IO_ERROR& )
+            {
+                return fail( "save" );
+            }
+
+            if( aSheet->GetScreenCount() > 1 )
+            {
+                oldScreen = aSheet->GetScreen();
+                aSheet->SetScreen( nullptr );
+                loadFromFile = true;
+            }
+        }
+    }
+
+    if( useScreen )
+    {
+        std::unique_ptr<SCH_SHEET> tmpSheet = std::make_unique<SCH_SHEET>( &schematic );
+        tmpSheet->GetField( FIELD_T::SHEET_FILENAME )->SetText( sheetFileName.GetFullPath() );
+        tmpSheet->SetScreen( useScreen );
+
+        if( aFrame->CheckSheetForRecursion( tmpSheet.get(), &aCurrentSheet ) )
+            return fail( "recursion" );
+
+        aSheet->SetScreen( useScreen );
+
+        SCH_SHEET_LIST sheetHierarchy( aSheet );
+        sheetHierarchy.AddNewSymbolInstances( aCurrentSheet, aFrame->Prj().GetProjectName() );
+        sheetHierarchy.AddNewSheetInstances( aCurrentSheet,
+                                             fullHierarchy.GetLastVirtualPageNumber() );
+    }
+    else if( loadFromFile )
+    {
+        bool restoreSheet = false;
+
+        if( isExistingSheet )
+        {
+            restoreSheet = true;
+            aCurrentSheet.LastScreen()->Remove( aSheet );
+        }
+
+        if( !aFrame->LoadSheetFromFile( aSheet, &aCurrentSheet, newAbsoluteFilename, false, true )
+            || aFrame->CheckSheetForRecursion( aSheet, &aCurrentSheet ) )
+        {
+            if( restoreSheet )
+            {
+                if( oldScreen )
+                    aSheet->SetScreen( oldScreen );
+
+                aCurrentSheet.LastScreen()->Append( aSheet );
+            }
+
+            return fail( "load" );
+        }
+
+        if( restoreSheet )
+            aCurrentSheet.LastScreen()->Append( aSheet );
+    }
+
+    if( aClearAnnotationNewItems )
+        *aClearAnnotationNewItems = clearAnnotation;
+
+    aFrame->RecalculateConnections( nullptr, GLOBAL_CLEANUP );
+
+    SCH_SHEET_LIST repairedList;
+    repairedList.BuildSheetList( &schematic.Root(), true );
+
+    return true;
+}
+
+
+wxString ccNextSheetFileName( SCH_EDIT_FRAME* aFrame, const wxString& aBase )
+{
+    if( !aFrame )
+        return aBase;
+
+    wxFileName base( aBase );
+    wxString   folder = wxFileName( aFrame->GetCurrentSheet().LastScreen()->GetFileName() ).GetPath();
+
+    for( int n = 1; n < 10000; ++n )
+    {
+        wxFileName candidate( base );
+
+        if( n > 1 )
+            candidate.SetName( wxString::Format( wxS( "%s_%d" ), base.GetName(), n ) );
+
+        wxFileName absolute( candidate );
+        absolute.Normalize( FN_NORMALIZE_FLAGS | wxPATH_NORM_ENV_VARS, folder );
+
+        wxString    path = absolute.GetFullPath();
+        SCH_SCREEN* inUse = nullptr;
+
+        path.Replace( wxT( "\\" ), wxT( "/" ) );
+
+        if( !aFrame->Schematic().Root().SearchHierarchy( path, &inUse ) && !wxFileExists( path ) )
+            return candidate.GetFullPath( wxPATH_UNIX );
+    }
+
+    return aBase;
+}
+#endif // __EMSCRIPTEN__
 
 
 bool SCH_EDIT_FRAME::LoadSheetFromFile( SCH_SHEET* aSheet, SCH_SHEET_PATH* aCurrentSheet,

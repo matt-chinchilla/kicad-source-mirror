@@ -19,6 +19,11 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: DIALOG_POSITION_RELATIVE answers the host's
+ * positionRelative prompt (host_prompt.h) under __EMSCRIPTEN__: Show asks first or updates the
+ * open card, and the receiver takes the answer, the picks and the cancel; a plain build is
+ * unchanged.
  */
 
 #pragma once
@@ -31,19 +36,49 @@
 #include <widgets/unit_binder.h>
 #include <tools/pcb_picker_tool.h>
 
+#ifdef __EMSCRIPTEN__
+#include <host_prompt.h>
+#endif
+
 class DIALOG_POSITION_RELATIVE : public DIALOG_POSITION_RELATIVE_BASE,
                                  public PCB_PICKER_TOOL::RECEIVER
+#ifdef __EMSCRIPTEN__
+                               , public CC_PROMPT_RECEIVER
+#endif
 {
 public:
     // Constructor and destructor
     DIALOG_POSITION_RELATIVE( PCB_BASE_FRAME* aParent );
+#ifdef __EMSCRIPTEN__
+    ~DIALOG_POSITION_RELATIVE();
+#else
     ~DIALOG_POSITION_RELATIVE() = default;
+#endif
 
     // Implement the RECEIVER interface for the callback from the TOOL
     void UpdatePickedItem( const EDA_ITEM* aItem ) override;
     void UpdatePickedPoint( const std::optional<VECTOR2I>& aPoint ) override;
 
+#ifdef __EMSCRIPTEN__
+    /// Shown (by POSITION_RELATIVE_TOOL, and again after each pick): asks the host first (ask
+    /// "positionRelative", modeless), or sends its open card the new record; KiCad's own window
+    /// only when nobody takes the ask.
+    bool Show( bool aShow = true ) override;
+
+    // CC_PROMPT_RECEIVER: the host's answer, its pick and its cancel reach this dialog's code.
+    bool CcApply( const nlohmann::json& aAnswer, std::string& aField ) override;
+    bool CcPick( const std::string& aKind ) override;
+    void CcCancel() override;
+#endif
+
 private:
+#ifdef __EMSCRIPTEN__
+    /// The record { anchor: { kind, x, y, label }, x, y } in millimeters.
+    nlohmann::json ccRecord();
+
+    int m_ccToken = 0;
+#endif
+
     /**
      * Reset a text field to be 0 if it was exited while blank.
      */

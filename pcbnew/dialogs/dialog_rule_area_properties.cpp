@@ -21,6 +21,10 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: under __EMSCRIPTEN__ InvokeRuleAreaEditor asks the
+ * host first through g_ccZoneSettingsHost (ask zoneSettings, kind ruleArea), KiCad's own dialog
+ * only when the host does not take it; a plain build is unchanged.
  */
 
 #include <advanced_config.h>
@@ -40,6 +44,15 @@
 #include <wx/statbox.h>
 #include <wx/statline.h>
 #include <wx/radiobut.h>
+
+#ifdef __EMSCRIPTEN__
+// The in-browser editor's zone settings ask (m3-e2), defined in dialog_copper_zones.cpp and set
+// at start up by the engine's board face (pcbjam cc_e2_pcb.inc): it asks the host to answer a
+// new zone's settings (host_prompt.h, ask zoneSettings) and returns 1 answered (the settings
+// written), 0 canceled, -1 not taken (KiCad's own dialog shows).
+extern int ( *g_ccZoneSettingsHost )( const char* aKind, PCB_BASE_FRAME* aFrame,
+                                ZONE_SETTINGS* aSettings );
+#endif
 
 #define LAYER_LIST_COLUMN_CHECK 0
 #define LAYER_LIST_COLUMN_ICON 1
@@ -95,6 +108,18 @@ private:
 int InvokeRuleAreaEditor( PCB_BASE_FRAME* aCaller, ZONE_SETTINGS* aZoneSettings, BOARD* aBoard,
                           CONVERT_SETTINGS* aConvertSettings )
 {
+#ifdef __EMSCRIPTEN__
+    if( g_ccZoneSettingsHost )
+    {
+        switch( g_ccZoneSettingsHost( "ruleArea", aCaller, aZoneSettings ) )
+        {
+        case 1:  return wxID_OK;
+        case 0:  return wxID_CANCEL;
+        default: break;
+        }
+    }
+#endif
+
     DIALOG_RULE_AREA_PROPERTIES dlg( aCaller, aZoneSettings, aConvertSettings, aBoard );
 
     return dlg.ShowModal();

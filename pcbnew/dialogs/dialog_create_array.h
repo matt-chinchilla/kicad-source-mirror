@@ -20,6 +20,10 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: DIALOG_CREATE_ARRAY answers the host's array
+ * prompt (host_prompt.h) under __EMSCRIPTEN__: Show asks first and the receiver takes the
+ * answer, the pick and the cancel; a plain build is unchanged.
  */
 
 #pragma once
@@ -36,8 +40,15 @@
 #include <widgets/unit_binder.h>
 #include <widgets/widget_save_restore.h>
 
+#ifdef __EMSCRIPTEN__
+#include <host_prompt.h>
+#endif
+
 
 class DIALOG_CREATE_ARRAY : public DIALOG_CREATE_ARRAY_BASE, public PCB_PICKER_TOOL::RECEIVER
+#ifdef __EMSCRIPTEN__
+                          , public CC_PROMPT_RECEIVER
+#endif
 {
 public:
     /**
@@ -56,7 +67,28 @@ public:
     void UpdatePickedItem( const EDA_ITEM* aItem ) override;
     void UpdatePickedPoint( const std::optional<VECTOR2I>& aPoint ) override;
 
+#ifdef __EMSCRIPTEN__
+    /// Shown (by ARRAY_TOOL): asks the host first (ask "array", modeless); KiCad's own window
+    /// only when nobody takes it.
+    bool Show( bool aShow = true ) override;
+
+    // CC_PROMPT_RECEIVER: the host's answer, its pick and its cancel reach this dialog's code.
+    bool CcApply( const nlohmann::json& aAnswer, std::string& aField ) override;
+    bool CcPick( const std::string& aKind ) override;
+    void CcCancel() override;
+#endif
+
 private:
+#ifdef __EMSCRIPTEN__
+    /// The array record, from what the controls hold (millimeters, degrees).
+    nlohmann::json ccRecord();
+
+    /// Write the answer's keys into the controls; false names the refused key in aField.
+    bool ccWriteAnswer( const nlohmann::json& aAnswer, std::string& aField );
+
+    int m_ccToken = 0;
+#endif
+
     // Event callbacks
     void OnParameterChanged( wxCommandEvent& aEvent ) override;
 
