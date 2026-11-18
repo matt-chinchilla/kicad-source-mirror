@@ -7,6 +7,12 @@
  * asks the in-browser editor's host (window.kicadHostSchItem) before KiCad's dialog or file
  * box, and goes down as that dialog's OK would place it when the host holds the request
  * (under __EMSCRIPTEN__).
+ * Modified by Circuit Center Inc on 2026-11-18: the sheet pin and hierarchical label tools read
+ * a placement template the in-browser host arms (K-SYNCPIN) where they read the sync sheet
+ * pins dialog's (under __EMSCRIPTEN__).
+ * Modified by Circuit Center Inc on 2026-11-18: placing a design block takes the block the
+ * in-browser host holds (K-B1) with its own place options, never the Design Blocks pane
+ * (under __EMSCRIPTEN__).
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -83,6 +89,21 @@
 
 #ifdef __EMSCRIPTEN__
 #include <tools/sch_item_host.h>
+#include <cc_host_design_block.h>
+
+// K-B1: the place options of the host block being placed (taken from the slot with it), read
+// where KiCad reads the Design Blocks chooser's settings; none for a block from the pane.
+static std::optional<CC_HOST_DESIGN_BLOCK_OPTIONS> s_ccBlockOptions;
+
+// K-SYNCPIN: the sync dialog's placement template when it has one, else the template the
+// in-browser host armed (kicadSheetPinsPlace), else none.
+static SCH_HIERLABEL* ccSyncPlacementTemplate( DIALOG_SYNC_SHEET_PINS* aDialog )
+{
+    if( aDialog && aDialog->GetPlacementTemplate() )
+        return aDialog->GetPlacementTemplate();
+
+    return CcSyncTemplate().Current();
+}
 #endif
 
 
@@ -802,6 +823,24 @@ int SCH_DRAWING_TOOLS::ImportSheet( const TOOL_EVENT& aEvent )
 
     if( placingDesignBlock )
     {
+#ifdef __EMSCRIPTEN__
+        s_ccBlockOptions.reset();
+
+        if( ccHostDesignBlock() )
+        {
+            // K-B1: the host's block, taken whole with its options; the pane is never read.
+            CC_HOST_DESIGN_BLOCK_OPTIONS options;
+            designBlock = ccTakeHostDesignBlock( &options );
+            sheetFileName = designBlock->GetSchematicFile();
+
+            if( sheetFileName.IsEmpty() || !wxFileExists( sheetFileName ) )
+                return 0;
+
+            s_ccBlockOptions = options;
+        }
+        else
+        {
+#endif
         SCH_DESIGN_BLOCK_PANE* designBlockPane = m_frame->GetDesignBlockPane();
 
         if( designBlockPane->GetSelectedLibId().IsValid() )
@@ -826,6 +865,9 @@ int SCH_DRAWING_TOOLS::ImportSheet( const TOOL_EVENT& aEvent )
                 return 0;
             }
         }
+#ifdef __EMSCRIPTEN__
+        }
+#endif
     }
     else
     {
@@ -851,6 +893,14 @@ int SCH_DRAWING_TOOLS::ImportSheet( const TOOL_EVENT& aEvent )
                 EDA_ITEMS newItems;
                 bool      keepAnnotations = cfg->m_DesignBlockChooserPanel.keep_annotations;
                 bool      placeAsGroup = cfg->m_DesignBlockChooserPanel.place_as_group;
+
+#ifdef __EMSCRIPTEN__
+                if( designBlock && s_ccBlockOptions )
+                {
+                    keepAnnotations = s_ccBlockOptions->keepAnnotations;
+                    placeAsGroup = s_ccBlockOptions->asGroup;
+                }
+#endif
 
                 selectionTool->ClearSelection();
 
@@ -1057,7 +1107,21 @@ int SCH_DRAWING_TOOLS::ImportSheet( const TOOL_EVENT& aEvent )
 
     // If we're placing sheet contents, we don't even want to run our tool loop, just add the items
     // to the canvas and run the move tool
+#ifdef __EMSCRIPTEN__
+    // K-B1: a host block places once, as a sheet or as its contents by its own option.
+    if( designBlock && s_ccBlockOptions && !s_ccBlockOptions->asSheet )
+    {
+        placeSheetContents();
+        s_ccBlockOptions.reset();
+
+        m_toolMgr->RunAction( ACTIONS::selectionClear );
+        m_view->ClearPreview();
+        return 0;
+    }
+    else if( !( designBlock && s_ccBlockOptions ) && !cfg->m_DesignBlockChooserPanel.place_as_sheet )
+#else
     if( !cfg->m_DesignBlockChooserPanel.place_as_sheet )
+#endif
     {
         while( placeSheetContents() && cfg->m_DesignBlockChooserPanel.repeated_placement )
         {}
@@ -2305,9 +2369,14 @@ int SCH_DRAWING_TOOLS::TwoClickPlace( const TOOL_EVENT& aEvent )
                 }
                 else if( isHierLabel )
                 {
+#ifdef __EMSCRIPTEN__
+                    if( SCH_HIERLABEL* pin = ccSyncPlacementTemplate( m_dialogSyncSheetPin.get() ) )
+                    {
+#else
                     if( m_dialogSyncSheetPin && m_dialogSyncSheetPin->GetPlacementTemplate() )
                     {
                         auto pin = static_cast<SCH_HIERLABEL*>( m_dialogSyncSheetPin->GetPlacementTemplate() );
+#endif
                         SCH_HIERLABEL* label = new SCH_HIERLABEL( cursorPos );
                         SCHEMATIC*     schematic = getModel<SCHEMATIC>();
                         label->SetText( pin->GetText() );
@@ -2364,12 +2433,19 @@ int SCH_DRAWING_TOOLS::TwoClickPlace( const TOOL_EVENT& aEvent )
                     else
                     {
                         // User is using the 'Sync Sheet Pins' tool
+#ifdef __EMSCRIPTEN__
+                        if( SCH_HIERLABEL* syncLabel = ccSyncPlacementTemplate( m_dialogSyncSheetPin.get() ) )
+                        {
+                            item = createNewSheetPinFromLabel( sheet, cursorPos, syncLabel );
+                        }
+#else
                         if( m_dialogSyncSheetPin && m_dialogSyncSheetPin->GetPlacementTemplate() )
                         {
                             item = createNewSheetPinFromLabel(
                                     sheet, cursorPos,
                                     static_cast<SCH_HIERLABEL*>( m_dialogSyncSheetPin->GetPlacementTemplate() ) );
                         }
+#endif
                         else
                         {
                             // User is using the 'Place Sheet Pins' tool
@@ -2464,6 +2540,23 @@ int SCH_DRAWING_TOOLS::TwoClickPlace( const TOOL_EVENT& aEvent )
                     m_dialogSyncSheetPin->Show( true );
                     break;
                 }
+#ifdef __EMSCRIPTEN__
+                else if( CcSyncTemplate().Current() )
+                {
+                    // The host's armed template: the next name, or the tool ends as the dialog's.
+                    CcSyncTemplate().EndPlaceItem();
+
+                    if( CcSyncTemplate().CanPlaceMore() )
+                    {
+                        item = nullptr;
+                        goto PLACE_NEXT;
+                    }
+
+                    m_frame->PopTool( aEvent );
+                    m_toolMgr->RunAction( ACTIONS::selectionClear );
+                    break;
+                }
+#endif
 
                 item = nullptr;
 
@@ -2593,6 +2686,11 @@ int SCH_DRAWING_TOOLS::TwoClickPlace( const TOOL_EVENT& aEvent )
         m_dialogSyncSheetPin->EndPlacement();
         m_dialogSyncSheetPin->Show( true );
     }
+
+#ifdef __EMSCRIPTEN__
+    // Esc or a tool switch ends the host's placement too: nothing stays armed.
+    CcSyncTemplate().EndPlacement();
+#endif
 
     return 0;
 }
@@ -3609,9 +3707,20 @@ int SCH_DRAWING_TOOLS::DrawSheet( const TOOL_EVENT& aEvent )
                 // The cached hierarchy was built before this sheet was added.
                 m_frame->Schematic().RefreshHierarchy();
 
+#ifdef __EMSCRIPTEN__
+                // K-B1: a host block keeps designators by its own option.
+                const bool keepBlockAnnotations =
+                        ( isDrawSheetFromDesignBlock && s_ccBlockOptions )
+                                ? s_ccBlockOptions->keepAnnotations
+                                : cfg->m_DesignBlockChooserPanel.keep_annotations;
+                bool annotateNonPowerSymbols = cfg->m_AnnotatePanel.automatic
+                                               && !( ( isDrawSheetCopy || isDrawSheetFromDesignBlock )
+                                                     && keepBlockAnnotations );
+#else
                 bool annotateNonPowerSymbols = cfg->m_AnnotatePanel.automatic
                                                && !( ( isDrawSheetCopy || isDrawSheetFromDesignBlock )
                                                      && cfg->m_DesignBlockChooserPanel.keep_annotations );
+#endif
                 bool annotatePowerSymbols = isDrawSheetFromDesignBlock;
 
                 if( annotateNonPowerSymbols || annotatePowerSymbols )
@@ -3646,7 +3755,13 @@ int SCH_DRAWING_TOOLS::DrawSheet( const TOOL_EVENT& aEvent )
                     }
                 }
 
+#ifdef __EMSCRIPTEN__
+                if( isDrawSheetFromDesignBlock
+                        && ( s_ccBlockOptions ? s_ccBlockOptions->asGroup
+                                              : cfg->m_DesignBlockChooserPanel.place_as_group ) )
+#else
                 if( isDrawSheetFromDesignBlock && cfg->m_DesignBlockChooserPanel.place_as_group )
+#endif
                 {
                     SCH_SCREEN* screen = m_frame->GetScreen();
 
@@ -3664,6 +3779,16 @@ int SCH_DRAWING_TOOLS::DrawSheet( const TOOL_EVENT& aEvent )
                     m_selectionTool->AddItemToSel( sheetGroup );
                 else
                     m_selectionTool->AddItemToSel( sheet );
+
+#ifdef __EMSCRIPTEN__
+                // K-B1: a host block is placed once; its options end with it.
+                if( isDrawSheetFromDesignBlock && s_ccBlockOptions )
+                {
+                    s_ccBlockOptions.reset();
+                    m_frame->PopTool( aEvent );
+                    break;
+                }
+#endif
 
                 if( ( isDrawSheetCopy || isDrawSheetFromDesignBlock )
                     && !cfg->m_DesignBlockChooserPanel.repeated_placement )

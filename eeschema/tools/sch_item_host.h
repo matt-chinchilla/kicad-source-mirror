@@ -8,6 +8,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 #include <emscripten.h>
 #include <json_common.h>
 #include <kiid.h>
@@ -143,6 +144,49 @@ bool ccChangeSheetFile( SCH_EDIT_FRAME* aFrame, SCH_SHEET* aSheet, SCH_SHEET_PAT
  * aBase with _2, _3 ... before the extension.
  */
 wxString ccNextSheetFileName( SCH_EDIT_FRAME* aFrame, const wxString& aBase );
+
+/**
+ * K-SYNCPIN (engine run 15, cap syncPins): the placement template DIALOG_SYNC_SHEET_PINS hands
+ * the drawing tools, armed by the host's kicadSheetPinsPlace when no dialog exists. Each
+ * template is a copy of the counterpart the new item takes its name and shape from (a sub
+ * sheet's hierarchical label for a new sheet pin, a sheet pin for a new label); the drawing
+ * tools read Current() where they read the dialog's GetPlacementTemplate(), call
+ * EndPlaceItem() after each placement and EndPlacement() when the tool ends, as the dialog's.
+ */
+struct CC_SYNC_TEMPLATE
+{
+    std::vector<std::unique_ptr<SCH_HIERLABEL>> items;
+    size_t                                      next = 0;
+
+    SCH_HIERLABEL* Current() const
+    {
+        return next < items.size() ? items[next].get() : nullptr;
+    }
+
+    bool CanPlaceMore() const { return next < items.size(); }
+
+    void EndPlaceItem()
+    {
+        if( next < items.size() )
+            ++next;
+
+        if( !CanPlaceMore() )
+            EndPlacement();
+    }
+
+    void EndPlacement()
+    {
+        items.clear();
+        next = 0;
+    }
+};
+
+/** The one armed template of the session (empty when nothing is armed). */
+inline CC_SYNC_TEMPLATE& CcSyncTemplate()
+{
+    static CC_SYNC_TEMPLATE s_template;
+    return s_template;
+}
 
 #endif // __EMSCRIPTEN__
 
