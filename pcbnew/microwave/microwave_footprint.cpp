@@ -19,6 +19,10 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: createFootprint reads the host's armed size,
+ * radius and angle (cc_microwave_arm.h) in place of its two entry dialogs when the running
+ * action was armed; a plain build is unchanged.
  */
 
 
@@ -29,6 +33,10 @@
 #include <dialogs/dialog_text_entry.h>
 #include <microwave/microwave_tool.h>
 #include <trigo.h>
+
+#ifdef __EMSCRIPTEN__
+#include <microwave/cc_microwave_arm.h>
+#endif
 
 
 FOOTPRINT* MICROWAVE_TOOL::createFootprint( MICROWAVE_FOOTPRINT_SHAPE aFootprintShape )
@@ -77,7 +85,31 @@ FOOTPRINT* MICROWAVE_TOOL::createFootprint( MICROWAVE_FOOTPRINT_SHAPE aFootprint
         break;
     }
 
+#ifdef __EMSCRIPTEN__
+    // The host's armed values (cc_microwave_arm.h) in place of both entry dialogs.
+    CC_MICROWAVE_SHAPE armShape = CC_MICROWAVE_SHAPE::NONE;
+
+    switch( aFootprintShape )
+    {
+    case MICROWAVE_FOOTPRINT_SHAPE::GAP:      armShape = CC_MICROWAVE_SHAPE::GAP;      break;
+    case MICROWAVE_FOOTPRINT_SHAPE::STUB:     armShape = CC_MICROWAVE_SHAPE::STUB;     break;
+    case MICROWAVE_FOOTPRINT_SHAPE::STUB_ARC: armShape = CC_MICROWAVE_SHAPE::ARC_STUB; break;
+    default:                                                                         break;
+    }
+
+    const CC_MICROWAVE_ARM* armed = cc_microwave::Active( armShape );
+#endif
+
     wxString             value = editFrame->StringFromValue( gap_size );
+
+#ifdef __EMSCRIPTEN__
+    if( armed )
+    {
+        gap_size = pcbIUScale.mmToIU( armed->m_valueMm );
+    }
+    else
+    {
+#endif
     WX_TEXT_ENTRY_DIALOG dlg( editFrame, msg, _( "Create Microwave Footprint" ), value );
 
     // TODO: why is this QuasiModal?
@@ -86,9 +118,25 @@ FOOTPRINT* MICROWAVE_TOOL::createFootprint( MICROWAVE_FOOTPRINT_SHAPE aFootprint
 
     value    = dlg.GetValue();
     gap_size = editFrame->ValueFromString( value );
+#ifdef __EMSCRIPTEN__
+    }
+#endif
 
     bool abort = false;
 
+#ifdef __EMSCRIPTEN__
+    if( armed && aFootprintShape == MICROWAVE_FOOTPRINT_SHAPE::STUB_ARC )
+    {
+        angle = EDA_ANGLE( armed->m_angleDeg, DEGREES_T );
+
+        if( angle < ANGLE_0 )
+            angle = -angle;
+
+        if( angle > ANGLE_180 )
+            angle = ANGLE_180;
+    }
+    else
+#endif
     if( aFootprintShape == MICROWAVE_FOOTPRINT_SHAPE::STUB_ARC )
     {
         msg = wxT( "0.0" );

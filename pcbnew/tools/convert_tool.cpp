@@ -20,6 +20,10 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: under __EMSCRIPTEN__ CONVERT_SETTINGS_DIALOG asks
+ * the host (host_prompt.h, ask convert, modal) in its own ShowModal and writes the answer through
+ * its own controls and TransferDataFromWindow; a plain build is unchanged.
  */
 #include "convert_tool.h"
 
@@ -59,6 +63,13 @@
 #include <macros.h>
 #include <zone.h>
 
+#ifdef __EMSCRIPTEN__
+#include <cmath>
+#include <limits>
+#include <optional>
+#include <host_prompt.h>
+#endif
+
 
 class CONVERT_SETTINGS_DIALOG : public DIALOG_SHIM
 {
@@ -70,6 +81,12 @@ public:
                          wxDefaultSize, wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER ),
             m_settings( aSettings )
     {
+#ifdef __EMSCRIPTEN__
+        m_ccShowCopyLineWidth = aShowCopyLineWidthOption;
+        m_ccShowCenterline = aShowCenterlineOption;
+        m_ccShowBoundingHull = aShowBoundingHullOption;
+#endif
+
         // Allow each distinct version of the dialog to have a different size
         m_hash_key = TO_UTF8( wxString::Format( wxS( "%s%c%c%c" ),
                                                 GetTitle(),
@@ -174,6 +191,12 @@ public:
         delete m_width;
     };
 
+#ifdef __EMSCRIPTEN__
+    /// Asks the host first (host_prompt.h, ask convert, modal); KiCad's own window only when
+    /// nobody takes the ask.
+    int ShowModal() override;
+#endif
+
 protected:
     bool TransferDataToWindow() override
     {
@@ -230,7 +253,182 @@ private:
     wxStaticText*     m_widthUnits;
     UNIT_BINDER*      m_width;
     wxCheckBox*       m_cbDeleteOriginals;
+
+#ifdef __EMSCRIPTEN__
+    bool              m_ccShowCopyLineWidth = true;
+    bool              m_ccShowCenterline = true;
+    bool              m_ccShowBoundingHull = true;
+#endif
 };
+
+
+#ifdef __EMSCRIPTEN__
+
+// The host prompt (host_prompt.h, ask "convert", modal). The record { strategies, strategy, gap,
+// lineWidth, deleteOriginals } is what the dialog would show (strategies the ones it offers,
+// lengths in millimeters); the answer (the same keys but strategies, any subset, closed) is
+// written into its own controls and its own TransferDataFromWindow fills the tool's settings.
+
+namespace
+{
+const char* ccConvertStrategyName( CONVERT_STRATEGY aStrategy )
+{
+    switch( aStrategy )
+    {
+    case COPY_LINEWIDTH: return "copyLineWidth";
+    case CENTERLINE:     return "centerline";
+    case BOUNDING_HULL:  return "boundingHull";
+    }
+
+    return "copyLineWidth";
+}
+
+
+// A non negative millimeter answer in internal units.
+bool ccConvertLength( const nlohmann::json& aValue, long long& aIU )
+{
+    if( !aValue.is_number() || !std::isfinite( aValue.get<double>() ) )
+        return false;
+
+    const double iu = std::round( pcbIUScale.mmToIU( aValue.get<double>() ) );
+
+    if( iu < 0.0 || iu > static_cast<double>( std::numeric_limits<int>::max() ) )
+        return false;
+
+    aIU = static_cast<long long>( iu );
+    return true;
+}
+} // namespace
+
+
+int CONVERT_SETTINGS_DIALOG::ShowModal()
+{
+    LoadControlState();
+    TransferDataToWindow();
+
+    nlohmann::json strategies = nlohmann::json::array();
+
+    if( m_ccShowCopyLineWidth )
+        strategies.push_back( "copyLineWidth" );
+
+    if( m_ccShowCenterline )
+        strategies.push_back( "centerline" );
+
+    if( m_ccShowBoundingHull )
+        strategies.push_back( "boundingHull" );
+
+    CONVERT_STRATEGY strategy = COPY_LINEWIDTH;
+
+    if( m_rbBoundingHull->GetValue() )
+        strategy = BOUNDING_HULL;
+    else if( m_rbCenterline->GetValue() )
+        strategy = CENTERLINE;
+
+    nlohmann::json record;
+    record["strategies"] = strategies;
+    record["strategy"] = ccConvertStrategyName( strategy );
+    record["gap"] = pcbIUScale.IUTomm( m_gap->GetIntValue() );
+    record["lineWidth"] = pcbIUScale.IUTomm( m_width->GetIntValue() );
+    record["deleteOriginals"] = m_cbDeleteOriginals->GetValue();
+
+    class RECEIVER : public CC_PROMPT_RECEIVER
+    {
+    public:
+        explicit RECEIVER( CONVERT_SETTINGS_DIALOG* aDialog ) : m_dialog( aDialog ) {}
+
+        bool CcApply( const nlohmann::json& aAnswer, std::string& aField ) override
+        {
+            if( !aAnswer.is_object() )
+                return false;
+
+            // Read the whole answer first.
+            wxRadioButton*           radio = nullptr;
+            std::optional<long long> gap, width;
+            std::optional<bool>      deleteOriginals;
+
+            for( auto it = aAnswer.begin(); it != aAnswer.end(); ++it )
+            {
+                const std::string& key = it.key();
+                bool               ok = true;
+
+                if( key == "strategy" )
+                {
+                    const std::string name = it->is_string() ? it->get<std::string>() : "";
+
+                    if( name == "copyLineWidth" && m_dialog->m_ccShowCopyLineWidth )
+                        radio = m_dialog->m_rbMimicLineWidth;
+                    else if( name == "centerline" && m_dialog->m_ccShowCenterline )
+                        radio = m_dialog->m_rbCenterline;
+                    else if( name == "boundingHull" && m_dialog->m_ccShowBoundingHull )
+                        radio = m_dialog->m_rbBoundingHull;
+                    else
+                        ok = false;
+                }
+                else if( key == "gap" || key == "lineWidth" )
+                {
+                    long long iu = 0;
+                    ok = ccConvertLength( *it, iu );
+
+                    if( ok )
+                        ( key == "gap" ? gap : width ) = iu;
+                }
+                else if( key == "deleteOriginals" )
+                {
+                    ok = it->is_boolean();
+
+                    if( ok )
+                        deleteOriginals = it->get<bool>();
+                }
+                else
+                {
+                    ok = false;
+                }
+
+                if( !ok )
+                {
+                    aField = key;
+                    return false;
+                }
+            }
+
+            if( radio )
+            {
+                radio->SetValue( true );
+                wxCommandEvent dummy;
+                m_dialog->onRadioButton( dummy );
+            }
+
+            if( gap )
+                m_dialog->m_gap->SetValue( *gap );
+
+            if( width )
+                m_dialog->m_width->SetValue( *width );
+
+            if( deleteOriginals )
+                m_dialog->m_cbDeleteOriginals->SetValue( *deleteOriginals );
+
+            if( !m_dialog->Validate() || !m_dialog->TransferDataFromWindow() )
+                return false;
+
+            m_dialog->SaveControlState();
+            return true;
+        }
+
+    private:
+        CONVERT_SETTINGS_DIALOG* m_dialog;
+    };
+
+    RECEIVER receiver( this );
+
+    switch( CcHostPromptModal( "convert", record, receiver ) )
+    {
+    case 1:  SetReturnCode( wxID_OK );     return wxID_OK;
+    case 0:  SetReturnCode( wxID_CANCEL ); return wxID_CANCEL;
+    default: return DIALOG_SHIM::ShowModal();
+    }
+}
+
+#endif // __EMSCRIPTEN__
 
 
 CONVERT_TOOL::CONVERT_TOOL() :
