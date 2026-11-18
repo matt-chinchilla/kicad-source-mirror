@@ -22,6 +22,9 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: LIB_SYMBOL::Compare tags each of its report
+ * lines with a code, pin number or field name for a CC_DIFF_REPORTER (WebAssembly build only).
  */
 
 #include <font/outline_font.h>
@@ -46,6 +49,10 @@
 #include <advanced_config.h>
 #include <properties/property.h>
 #include <properties/property_mgr.h>
+
+#ifdef __EMSCRIPTEN__
+#include <cc_diff_finding.h>
+#endif
 
 
 /**
@@ -2053,6 +2060,9 @@ int LIB_SYMBOL::Compare( const LIB_SYMBOL& aRhs, int aCompareFlags, REPORTER* aR
     if( m_options != aRhs.m_options )
     {
         retv = ( m_options == ENTRY_NORMAL ) ? -1 : 1;
+#ifdef __EMSCRIPTEN__
+        CcDiffTag( aReporter, "power" );
+#endif
         REPORT( _( "Power flag differs." ) );
 
         if( !aReporter )
@@ -2062,6 +2072,9 @@ int LIB_SYMBOL::Compare( const LIB_SYMBOL& aRhs, int aCompareFlags, REPORTER* aR
     if( int tmp = m_unitCount - aRhs.m_unitCount )
     {
         retv = tmp;
+#ifdef __EMSCRIPTEN__
+        CcDiffTag( aReporter, "unitCount" );
+#endif
         REPORT( _( "Unit count differs." ) );
 
         if( !aReporter )
@@ -2101,6 +2114,9 @@ int LIB_SYMBOL::Compare( const LIB_SYMBOL& aRhs, int aCompareFlags, REPORTER* aR
     if( int tmp = static_cast<int>( aShapes.size() - bShapes.size() ) )
     {
         retv = tmp;
+#ifdef __EMSCRIPTEN__
+        CcDiffTag( aReporter, "graphicCount" );
+#endif
         REPORT( _( "Graphic item count differs." ) );
 
         if( !aReporter )
@@ -2113,6 +2129,9 @@ int LIB_SYMBOL::Compare( const LIB_SYMBOL& aRhs, int aCompareFlags, REPORTER* aR
             if( int tmp2 = ( *aIt )->compare( *( *bIt ), aCompareFlags ) )
             {
                 retv = tmp2;
+#ifdef __EMSCRIPTEN__
+                CcDiffTag( aReporter, "graphic" );
+#endif
                 REPORT( wxString::Format( _( "Graphic item differs: %s; %s." ), ITEM_DESC( *aIt ),
                                           ITEM_DESC( *bIt ) ) );
 
@@ -2129,6 +2148,9 @@ int LIB_SYMBOL::Compare( const LIB_SYMBOL& aRhs, int aCompareFlags, REPORTER* aR
         if( !bPin )
         {
             retv = 1;
+#ifdef __EMSCRIPTEN__
+            CcDiffTag( aReporter, "pinExtra", nullptr, aPin->GetNumber() );
+#endif
             REPORT( wxString::Format( _( "Extra pin in schematic symbol: %s." ), ITEM_DESC( aPin ) ) );
 
             if( !aReporter )
@@ -2137,6 +2159,9 @@ int LIB_SYMBOL::Compare( const LIB_SYMBOL& aRhs, int aCompareFlags, REPORTER* aR
         else if( int tmp = aPin->SCH_ITEM::compare( *bPin, aCompareFlags ) )
         {
             retv = tmp;
+#ifdef __EMSCRIPTEN__
+            CcDiffTag( aReporter, "pin", nullptr, aPin->GetNumber() );
+#endif
             REPORT( wxString::Format( _( "Pin %s differs: %s; %s" ), aPin->GetNumber(), ITEM_DESC( aPin ),
                                       ITEM_DESC( bPin ) ) );
 
@@ -2152,6 +2177,9 @@ int LIB_SYMBOL::Compare( const LIB_SYMBOL& aRhs, int aCompareFlags, REPORTER* aR
         if( !aPin )
         {
             retv = 1;
+#ifdef __EMSCRIPTEN__
+            CcDiffTag( aReporter, "pinMissing", nullptr, bPin->GetNumber() );
+#endif
             REPORT( wxString::Format( _( "Missing pin in schematic symbol: %s." ), ITEM_DESC( bPin ) ) );
 
             if( !aReporter )
@@ -2171,6 +2199,9 @@ int LIB_SYMBOL::Compare( const LIB_SYMBOL& aRhs, int aCompareFlags, REPORTER* aR
         if( !bField )
         {
             retv = 1;
+#ifdef __EMSCRIPTEN__
+            CcDiffTag( aReporter, "fieldExtra", nullptr, wxEmptyString, aField->GetName( false ) );
+#endif
             REPORT( wxString::Format( _( "Extra field in schematic symbol: %s." ), ITEM_DESC( aField ) ) );
 
             if( !aReporter )
@@ -2197,6 +2228,9 @@ int LIB_SYMBOL::Compare( const LIB_SYMBOL& aRhs, int aCompareFlags, REPORTER* aR
             if( tmp != 0 )
             {
                 retv = tmp;
+#ifdef __EMSCRIPTEN__
+                CcDiffTag( aReporter, "field", nullptr, wxEmptyString, aField->GetName( false ) );
+#endif
                 REPORT( wxString::Format( _( "Field '%s' differs: %s; %s." ), aField->GetName( false ),
                                           ITEM_DESC( aField ), ITEM_DESC( bField ) ) );
 
@@ -2218,6 +2252,9 @@ int LIB_SYMBOL::Compare( const LIB_SYMBOL& aRhs, int aCompareFlags, REPORTER* aR
         if( !aField )
         {
             retv = 1;
+#ifdef __EMSCRIPTEN__
+            CcDiffTag( aReporter, "fieldMissing", nullptr, wxEmptyString, bField->GetName( false ) );
+#endif
             REPORT( wxString::Format( _( "Missing field in schematic symbol: %s." ), ITEM_DESC( bField ) ) );
 
             if( !aReporter )
@@ -2228,6 +2265,9 @@ int LIB_SYMBOL::Compare( const LIB_SYMBOL& aRhs, int aCompareFlags, REPORTER* aR
     if( int tmp = static_cast<int>( m_fpFilters.GetCount() - aRhs.m_fpFilters.GetCount() ) )
     {
         retv = tmp;
+#ifdef __EMSCRIPTEN__
+        CcDiffTag( aReporter, "fpFilters" );
+#endif
         REPORT( _( "Footprint filter count differs." ) );
 
         if( !aReporter )
@@ -2240,6 +2280,9 @@ int LIB_SYMBOL::Compare( const LIB_SYMBOL& aRhs, int aCompareFlags, REPORTER* aR
             if( int tmp2 = m_fpFilters[i].Cmp( aRhs.m_fpFilters[i] ) )
             {
                 retv = tmp2;
+#ifdef __EMSCRIPTEN__
+                CcDiffTag( aReporter, "fpFilters" );
+#endif
                 REPORT( _( "Footprint filters differ." ) );
 
                 if( !aReporter )
@@ -2251,6 +2294,9 @@ int LIB_SYMBOL::Compare( const LIB_SYMBOL& aRhs, int aCompareFlags, REPORTER* aR
     if( int tmp = m_keyWords.Cmp( aRhs.m_keyWords ) )
     {
         retv = tmp;
+#ifdef __EMSCRIPTEN__
+        CcDiffTag( aReporter, "keywords" );
+#endif
         REPORT( _( "Symbol keywords differ." ) );
 
         if( !aReporter )
@@ -2260,6 +2306,9 @@ int LIB_SYMBOL::Compare( const LIB_SYMBOL& aRhs, int aCompareFlags, REPORTER* aR
     if( int tmp = m_pinNameOffset - aRhs.m_pinNameOffset )
     {
         retv = tmp;
+#ifdef __EMSCRIPTEN__
+        CcDiffTag( aReporter, "pinNameOffset" );
+#endif
         REPORT( _( "Symbol pin name offsets differ." ) );
 
         if( !aReporter )
@@ -2271,6 +2320,9 @@ int LIB_SYMBOL::Compare( const LIB_SYMBOL& aRhs, int aCompareFlags, REPORTER* aR
         if( m_showPinNames != aRhs.m_showPinNames )
         {
             retv = ( m_showPinNames ) ? 1 : -1;
+#ifdef __EMSCRIPTEN__
+            CcDiffTag( aReporter, "showPinNames" );
+#endif
             REPORT( _( "Show pin names settings differ." ) );
 
             if( !aReporter )
@@ -2280,6 +2332,9 @@ int LIB_SYMBOL::Compare( const LIB_SYMBOL& aRhs, int aCompareFlags, REPORTER* aR
         if( m_showPinNumbers != aRhs.m_showPinNumbers )
         {
             retv = ( m_showPinNumbers ) ? 1 : -1;
+#ifdef __EMSCRIPTEN__
+            CcDiffTag( aReporter, "showPinNumbers" );
+#endif
             REPORT( _( "Show pin numbers settings differ." ) );
 
             if( !aReporter )
@@ -2289,6 +2344,9 @@ int LIB_SYMBOL::Compare( const LIB_SYMBOL& aRhs, int aCompareFlags, REPORTER* aR
         if( m_excludedFromSim != aRhs.m_excludedFromSim )
         {
             retv = ( m_excludedFromSim ) ? -1 : 1;
+#ifdef __EMSCRIPTEN__
+            CcDiffTag( aReporter, "excludeSim" );
+#endif
             REPORT( _( "Exclude from simulation settings differ." ) );
 
             if( !aReporter )
@@ -2298,6 +2356,9 @@ int LIB_SYMBOL::Compare( const LIB_SYMBOL& aRhs, int aCompareFlags, REPORTER* aR
         if( m_excludedFromBOM != aRhs.m_excludedFromBOM )
         {
             retv = ( m_excludedFromBOM ) ? -1 : 1;
+#ifdef __EMSCRIPTEN__
+            CcDiffTag( aReporter, "excludeBom" );
+#endif
             REPORT( _( "Exclude from bill of materials settings differ." ) );
 
             if( !aReporter )
@@ -2307,6 +2368,9 @@ int LIB_SYMBOL::Compare( const LIB_SYMBOL& aRhs, int aCompareFlags, REPORTER* aR
         if( m_excludedFromBoard != aRhs.m_excludedFromBoard )
         {
             retv = ( m_excludedFromBoard ) ? -1 : 1;
+#ifdef __EMSCRIPTEN__
+            CcDiffTag( aReporter, "excludeBoard" );
+#endif
             REPORT( _( "Exclude from board settings differ." ) );
 
             if( !aReporter )
@@ -2316,6 +2380,9 @@ int LIB_SYMBOL::Compare( const LIB_SYMBOL& aRhs, int aCompareFlags, REPORTER* aR
         if( m_excludedFromPosFiles != aRhs.m_excludedFromPosFiles )
         {
             retv = ( m_excludedFromPosFiles ) ? -1 : 1;
+#ifdef __EMSCRIPTEN__
+            CcDiffTag( aReporter, "excludePos" );
+#endif
             REPORT( _( "Exclude from position files settings differ." ) );
 
             if( !aReporter )

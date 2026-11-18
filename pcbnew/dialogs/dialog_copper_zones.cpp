@@ -21,6 +21,10 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: under __EMSCRIPTEN__ InvokeCopperZonesEditor asks
+ * the host first for a new zone (aZone null) through g_ccZoneSettingsHost (ask zoneSettings, kind
+ * copper), KiCad's own dialog only when the host does not take it; a plain build is unchanged.
  */
 
 #include <wx/radiobut.h>
@@ -40,6 +44,18 @@
 #include <panel_zone_properties.h>
 #include <dialog_copper_zones_base.h>
 #include <tools/pcb_actions.h>
+
+#ifdef __EMSCRIPTEN__
+// The in-browser editor's zone settings ask (m3-e2), shared by the three zone editors' Invoke
+// functions (dialog_copper_zones.cpp, dialog_non_copper_zones_properties.cpp,
+// dialog_rule_area_properties.cpp, each declaring it extern) and set at start up by the
+// engine's board face (pcbjam cc_e2_pcb.inc, merged image only): it asks the host to answer a
+// new zone's settings (host_prompt.h, ask zoneSettings, kind copper, nonCopper or ruleArea) and
+// returns 1 answered (aSettings written), 0 canceled, -1 not taken (KiCad's own dialog shows).
+// Null when nothing set it: KiCad's own dialog, as before.
+int ( *g_ccZoneSettingsHost )( const char* aKind, PCB_BASE_FRAME* aFrame,
+                                ZONE_SETTINGS* aSettings ) = nullptr;
+#endif
 
 
 class DIALOG_COPPER_ZONE : public DIALOG_COPPER_ZONE_BASE
@@ -91,6 +107,20 @@ private:
 int InvokeCopperZonesEditor( PCB_BASE_FRAME* aCaller, ZONE* aZone, ZONE_SETTINGS* aSettings,
                              CONVERT_SETTINGS* aConvertSettings )
 {
+#ifdef __EMSCRIPTEN__
+    // A new zone only: an existing copper zone's properties are taken earlier (the board
+    // properties ask of EDIT_TOOL::Properties).
+    if( !aZone && g_ccZoneSettingsHost )
+    {
+        switch( g_ccZoneSettingsHost( "copper", aCaller, aSettings ) )
+        {
+        case 1:  return wxID_OK;
+        case 0:  return wxID_CANCEL;
+        default: break;
+        }
+    }
+#endif
+
     DIALOG_COPPER_ZONE dlg( aCaller, aZone, aSettings, aConvertSettings );
 
     dlg.ShowModal();

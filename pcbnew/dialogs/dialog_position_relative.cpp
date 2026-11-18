@@ -19,6 +19,11 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: under __EMSCRIPTEN__ the dialog asks the host
+ * (host_prompt.h, ask positionRelative, modeless) before it shows, sends the open card each
+ * pick's result, and runs its own OnOkClick, origin buttons, pickers and cancel for the host's
+ * answers; a plain build is unchanged.
  */
 
 #include "dialogs/dialog_position_relative.h"
@@ -31,6 +36,10 @@
 #include <tools/pcb_picker_tool.h>
 #include <tools/position_relative_tool.h>
 #include <trigo.h>
+
+#ifdef __EMSCRIPTEN__
+#include <cmath>
+#endif
 
 // initialise statics
 DIALOG_POSITION_RELATIVE::ANCHOR_TYPE DIALOG_POSITION_RELATIVE::s_anchorType = DIALOG_POSITION_RELATIVE::ANCHOR_ITEM;
@@ -365,3 +374,198 @@ void DIALOG_POSITION_RELATIVE::OnTextFocusLost( wxFocusEvent& event )
 
     event.Skip();
 }
+
+
+#ifdef __EMSCRIPTEN__
+
+// The host prompt (host_prompt.h, ask "positionRelative", modeless). The answer { x, y } runs
+// this dialog's own OnOkClick (the move, one commit "Position Relative"), then the dialog
+// closes as KiCad's OK closes it; { anchor: "gridOrigin" | "userOrigin" } runs the matching
+// button's handler and the card is sent the new record; prompt.pick runs the item and point
+// buttons' handlers.
+
+DIALOG_POSITION_RELATIVE::~DIALOG_POSITION_RELATIVE()
+{
+    // A prompt still parked on this dialog ends ("gone").
+    CcHostPromptForget( this );
+}
+
+
+nlohmann::json DIALOG_POSITION_RELATIVE::ccRecord()
+{
+    const char* kind = "item";
+
+    switch( s_anchorType )
+    {
+    case ANCHOR_GRID_ORIGIN: kind = "gridOrigin"; break;
+    case ANCHOR_USER_ORIGIN: kind = "userOrigin"; break;
+    case ANCHOR_ITEM:        kind = "item";       break;
+    case ANCHOR_POINT:       kind = "point";      break;
+    }
+
+    const VECTOR2I anchor = getAnchorPos();
+    VECTOR2I       offset;
+    getTranslationInIU( offset, m_polarCoords->IsChecked() );
+
+    nlohmann::json record;
+    record["anchor"] = nlohmann::json{
+        { "kind", kind },
+        { "x", pcbIUScale.IUTomm( anchor.x ) },
+        { "y", pcbIUScale.IUTomm( anchor.y ) },
+        { "label", m_referenceInfo->GetLabel().ToStdString( wxConvUTF8 ) } };
+    record["x"] = pcbIUScale.IUTomm( offset.x );
+    record["y"] = pcbIUScale.IUTomm( offset.y );
+    return record;
+}
+
+
+bool DIALOG_POSITION_RELATIVE::Show( bool aShow )
+{
+    if( aShow )
+    {
+        TransferDataToWindow();
+
+        // Already the host's (a pick ended, or the tool asked again): its card is sent the
+        // new record and stays open.
+        if( m_ccToken && CcParkedPrompts().count( m_ccToken ) )
+        {
+            CcHostPromptUpdate( m_ccToken, ccRecord() );
+            return true;
+        }
+
+        m_ccToken = CcHostPromptModeless( "positionRelative", ccRecord(), this );
+
+        if( m_ccToken )
+            return true;
+    }
+
+    return DIALOG_POSITION_RELATIVE_BASE::Show( aShow );
+}
+
+
+bool DIALOG_POSITION_RELATIVE::CcApply( const nlohmann::json& aAnswer, std::string& aField )
+{
+    if( !aAnswer.is_object() || aAnswer.empty() )
+        return false;
+
+    // Read the whole answer first.
+    std::optional<double> x, y;
+    std::string           anchor;
+
+    for( auto it = aAnswer.begin(); it != aAnswer.end(); ++it )
+    {
+        const std::string& key = it.key();
+
+        if( key == "x" || key == "y" )
+        {
+            if( !it->is_number() || !std::isfinite( it->get<double>() )
+                    || std::fabs( it->get<double>() ) > 2000.0 )
+            {
+                aField = key;
+                return false;
+            }
+
+            ( key == "x" ? x : y ) = it->get<double>();
+        }
+        else if( key == "anchor" )
+        {
+            if( !it->is_string()
+                    || ( it->get<std::string>() != "gridOrigin"
+                         && it->get<std::string>() != "userOrigin" ) )
+            {
+                aField = key;
+                return false;
+            }
+
+            anchor = it->get<std::string>();
+        }
+        else
+        {
+            aField = key;
+            return false;
+        }
+    }
+
+    if( !anchor.empty() )
+    {
+        wxCommandEvent event( wxEVT_BUTTON );
+
+        if( anchor == "gridOrigin" )
+        {
+            event.SetEventObject( m_grid_origin_button );
+            OnUseGridOriginClick( event );
+        }
+        else
+        {
+            event.SetEventObject( m_user_origin_button );
+            OnUseUserOriginClick( event );
+        }
+    }
+
+    if( !x && !y )
+    {
+        // An anchor alone: the card stays open and shows the new anchor.
+        CcHostPromptUpdate( m_ccToken, ccRecord() );
+        return true;
+    }
+
+    // The dialog delivers Cartesian only (OnOkClick): a polar entry is first turned into its
+    // Cartesian values, then the answer's keys are written over them.
+    VECTOR2I current;
+    getTranslationInIU( current, m_polarCoords->IsChecked() );
+
+    if( m_polarCoords->IsChecked() )
+    {
+        m_polarCoords->SetValue( false );
+        updateDialogControls( false );
+    }
+
+    m_xOffset.ChangeValue( x ? pcbIUScale.mmToIU( *x ) : current.x );
+    m_yOffset.ChangeValue( y ? pcbIUScale.mmToIU( *y ) : current.y );
+    m_stateX = m_xOffset.GetDoubleValue();
+    m_stateY = m_yOffset.GetDoubleValue();
+
+    wxCommandEvent event( wxEVT_BUTTON, wxID_OK );
+    event.SetEventObject( m_stdButtonsOK );
+    OnOkClick( event );
+
+    // KiCad's OK closes this modeless dialog (it is kept for the next use): the prompt ends.
+    CcParkedPrompts().erase( m_ccToken );
+    m_ccToken = 0;
+    DIALOG_POSITION_RELATIVE_BASE::Show( false );
+    return true;
+}
+
+
+bool DIALOG_POSITION_RELATIVE::CcPick( const std::string& aKind )
+{
+    wxCommandEvent event( wxEVT_BUTTON );
+
+    // The dialog's own pickers (KiCad's PCB_PICKER_TOOL); the result comes back through
+    // UpdatePickedItem or UpdatePickedPoint, whose Show( true ) sends the card the new record.
+    if( aKind == "item" )
+    {
+        event.SetEventObject( m_select_anchor_button );
+        OnSelectItemClick( event );
+        return true;
+    }
+
+    if( aKind == "point" )
+    {
+        event.SetEventObject( m_select_point_button );
+        OnSelectPointClick( event );
+        return true;
+    }
+
+    return false;
+}
+
+
+void DIALOG_POSITION_RELATIVE::CcCancel()
+{
+    // KiCad's Cancel of this modeless dialog: hidden, kept for the next use.
+    m_ccToken = 0;
+    DIALOG_POSITION_RELATIVE_BASE::Show( false );
+}
+
+#endif // __EMSCRIPTEN__

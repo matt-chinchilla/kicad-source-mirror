@@ -20,6 +20,10 @@
  *
  * You should have received a copy of the GNU General Public License along
  * with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: PCB_BASE_FRAME::SelectOneLayer asks the
+ * in-browser editor's host to choose the layer (host_prompt.h, ask layer) before
+ * PCB_ONE_LAYER_SELECTOR is built (WebAssembly build only).
  */
 
 #include <wx/bitmap.h>
@@ -45,6 +49,10 @@
 #include <widgets/layer_box_selector.h>
 #include <widgets/wx_grid.h>
 #include <widgets/std_bitmap_button.h>
+
+#ifdef __EMSCRIPTEN__
+#include <host_prompt.h>
+#endif
 
 
 // Column position by function:
@@ -301,6 +309,81 @@ PCB_LAYER_ID PCB_BASE_FRAME::SelectOneLayer( PCB_LAYER_ID aDefaultLayer,
                                              const LSET& aNotAllowedLayersMask,
                                              wxPoint aDlgPosition )
 {
+#ifdef __EMSCRIPTEN__
+    // The in-browser editor's host chooses the layer in a card of its own (host_prompt.h, ask
+    // "layer"): the same list PCB_ONE_LAYER_SELECTOR::buildList shows, asked before the dialog
+    // is built.
+    if( GetBoard() && GetColorSettings() )
+    {
+        std::vector<PCB_LAYER_ID> allowed;
+        nlohmann::json            layers = nlohmann::json::array();
+
+        for( PCB_LAYER_ID layer : GetBoard()->GetEnabledLayers().UIOrder() )
+        {
+            if( aNotAllowedLayersMask[layer] )
+                continue;
+
+            allowed.push_back( layer );
+            layers.push_back( {
+                    { "canonical", BOARD::GetStandardLayerName( layer ).ToStdString( wxConvUTF8 ) },
+                    { "name", GetBoard()->GetLayerName( layer ).ToStdString( wxConvUTF8 ) },
+                    { "color", GetColorSettings()->GetColor( layer ).ToHexString().Lower()
+                                       .ToStdString( wxConvUTF8 ) } } );
+        }
+
+        nlohmann::json record;
+        record["current"] = aDefaultLayer >= 0 && aDefaultLayer < PCB_LAYER_ID_COUNT
+                                    ? BOARD::GetStandardLayerName( aDefaultLayer )
+                                              .ToStdString( wxConvUTF8 )
+                                    : std::string();
+        record["layers"] = layers;
+
+        class RECEIVER : public CC_PROMPT_RECEIVER
+        {
+        public:
+            explicit RECEIVER( const std::vector<PCB_LAYER_ID>& aAllowed ) : m_allowed( aAllowed ) {}
+
+            bool CcApply( const nlohmann::json& aAnswer, std::string& aField ) override
+            {
+                aField = "layer";
+
+                if( !aAnswer.is_object() || !aAnswer.contains( "layer" )
+                    || !aAnswer["layer"].is_string() )
+                {
+                    return false;
+                }
+
+                const wxString name = wxString::FromUTF8( aAnswer["layer"].get<std::string>() );
+
+                for( PCB_LAYER_ID layer : m_allowed )
+                {
+                    if( BOARD::GetStandardLayerName( layer ) == name )
+                    {
+                        m_chosen = layer;
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+
+            PCB_LAYER_ID m_chosen = UNDEFINED_LAYER;
+
+        private:
+            const std::vector<PCB_LAYER_ID>& m_allowed;
+        };
+
+        RECEIVER receiver( allowed );
+
+        switch( CcHostPromptModal( "layer", record, receiver ) )
+        {
+        case 1:  return receiver.m_chosen;
+        case 0:  return UNDEFINED_LAYER;
+        default: break;
+        }
+    }
+#endif
+
     PCB_ONE_LAYER_SELECTOR dlg( this, aDefaultLayer, aNotAllowedLayersMask, true );
 
     if( aDlgPosition != wxDefaultPosition )

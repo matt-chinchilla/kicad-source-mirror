@@ -22,6 +22,10 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: createPolygonShape takes the host's armed
+ * points, kind and scale (cc_microwave_arm.h) in place of MWAVE_POLYGONAL_SHAPE_DLG and its
+ * file chooser when the running action was armed; a plain build is unchanged.
  */
 
 #include <confirm.h>
@@ -44,6 +48,10 @@
 #include <wx/radiobox.h>
 #include <wx/sizer.h>
 #include <wx/statbox.h>
+
+#ifdef __EMSCRIPTEN__
+#include <microwave/cc_microwave_arm.h>
+#endif
 
 static std::vector< wxRealPoint > g_PolyEdges;
 static double  g_ShapeScaleX, g_ShapeScaleY;
@@ -292,6 +300,26 @@ FOOTPRINT* MICROWAVE_TOOL::createPolygonShape()
 
     PCB_EDIT_FRAME& editFrame  = *getEditFrame<PCB_EDIT_FRAME>();
 
+#ifdef __EMSCRIPTEN__
+    // The host's armed shape (cc_microwave_arm.h) in place of MWAVE_POLYGONAL_SHAPE_DLG and
+    // its file chooser: the same globals ReadDataShapeDescr and TransferDataFromWindow fill,
+    // the points as the description's $COORD pairs, the scale in millimeters.
+    if( const CC_MICROWAVE_ARM* armed = cc_microwave::Active( CC_MICROWAVE_SHAPE::POLYGON ) )
+    {
+        g_PolyEdges.clear();
+
+        for( const std::pair<double, double>& pt : armed->m_points )
+            g_PolyEdges.emplace_back( pt.first, pt.second );
+
+        g_ShapeScaleX = armed->m_sizeXMm * pcbIUScale.IU_PER_MM;
+        g_ShapeScaleY = armed->m_sizeYMm * pcbIUScale.IU_PER_MM;
+        g_ShapeSize.x = KiROUND( g_ShapeScaleX );
+        g_ShapeSize.y = KiROUND( g_ShapeScaleY );
+        g_PolyShapeType = armed->m_kind;
+    }
+    else
+    {
+#endif
     MWAVE_POLYGONAL_SHAPE_DLG dlg( &editFrame, wxDefaultPosition );
 
     int ret = dlg.ShowModal();
@@ -301,6 +329,9 @@ FOOTPRINT* MICROWAVE_TOOL::createPolygonShape()
         g_PolyEdges.clear();
         return nullptr;
     }
+#ifdef __EMSCRIPTEN__
+    }
+#endif
 
     if( g_PolyShapeType == 2 )  // mirrored
         g_ShapeScaleY = -g_ShapeScaleY;

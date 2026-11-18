@@ -20,6 +20,11 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: DisplayError, DisplayErrorMessage,
+ * DisplayInfoMessage, IsOK and OKOrCancelDialog ask the in-browser editor's host first (ask
+ * message, CcHostMessage in kidialog.cpp), KiCad's own message box only when the host does not
+ * take it (WebAssembly build only).
  */
 
 #include <confirm.h>
@@ -31,6 +36,12 @@
 #include <wx/msgdlg.h>
 #include <wx/choicdlg.h>
 #include <wx/crt.h>
+
+#ifdef __EMSCRIPTEN__
+// kidialog.cpp: the message ask (host_prompt.h, ask "message"). Returns the pressed button's wx
+// id, or -1 when the host does not take it.
+int CcHostMessage( const wxMessageDialogBase& aDialog, bool aOfferDontAsk, bool* aDontAsk );
+#endif
 /**
  * Flag to enable confirmation dialog debugging output.
  *
@@ -182,7 +193,15 @@ int OKOrCancelDialog( wxWindow* aParent, const wxString& aWarning, const wxStrin
     if( aApplyToAll )
         dlg.ShowCheckBox( _( "&Apply to all" ), true );
 
+#ifdef __EMSCRIPTEN__
+    // The host's card first; "Apply to all" keeps KiCad's own default (checked) there.
+    int ret = CcHostMessage( dlg, false, nullptr );
+
+    if( ret == -1 )
+        ret = dlg.ShowModal();
+#else
     int ret = dlg.ShowModal();
+#endif
 
     if( aApplyToAll )
         *aApplyToAll = dlg.IsCheckBoxChecked();
@@ -213,7 +232,12 @@ void DisplayError( wxWindow* aParent, const wxString& aText )
                                          wxOK | wxCENTRE | wxRESIZE_BORDER |
                                          wxICON_ERROR | wxSTAY_ON_TOP );
 
+#ifdef __EMSCRIPTEN__
+    if( CcHostMessage( *dlg, false, nullptr ) == -1 )
+        dlg->ShowModal();
+#else
     dlg->ShowModal();
+#endif
     dlg->Destroy();
 }
 
@@ -241,7 +265,12 @@ void DisplayErrorMessage( wxWindow* aParent, const wxString& aText, const wxStri
     if( !aExtraInfo.IsEmpty() )
         dlg->SetExtendedMessage( aExtraInfo );
 
+#ifdef __EMSCRIPTEN__
+    if( CcHostMessage( *dlg, false, nullptr ) == -1 )
+        dlg->ShowModal();
+#else
     dlg->ShowModal();
+#endif
     dlg->Destroy();
 }
 
@@ -270,7 +299,12 @@ void DisplayInfoMessage( wxWindow* aParent, const wxString& aMessage, const wxSt
     if( !aExtraInfo.IsEmpty() )
         dlg->SetExtendedMessage( aExtraInfo );
 
+#ifdef __EMSCRIPTEN__
+    if( CcHostMessage( *dlg, false, nullptr ) == -1 )
+        dlg->ShowModal();
+#else
     dlg->ShowModal();
+#endif
     dlg->Destroy();
 }
 
@@ -295,6 +329,13 @@ bool IsOK( wxWindow* aParent, const wxString& aMessage )
                               wxCENTRE | icon | wxSTAY_ON_TOP );
 
     dlg.SetOKCancelLabels( _( "&Yes" ), _( "&No" ) );
+
+#ifdef __EMSCRIPTEN__
+    const int hosted = CcHostMessage( dlg, false, nullptr );
+
+    if( hosted != -1 )
+        return hosted == wxID_OK;
+#endif
 
     return dlg.ShowModal() == wxID_OK;
 }

@@ -19,6 +19,9 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: DIALOG_OUTSET_ITEMS asks the host (host_prompt.h,
+ * ask outset, modal) in its own ShowModal under __EMSCRIPTEN__; a plain build is unchanged.
  */
 
 #pragma once
@@ -29,6 +32,10 @@
 #include <widgets/unit_binder.h>
 #include <tools/item_modification_routine.h>
 
+#ifdef __EMSCRIPTEN__
+#include <host_prompt.h>
+#endif
+
 /**
  * DIALOG_OUTSET_ITEMS, derived from DIALOG_OUTSET_ITEMS_BASE,
  * created by wxFormBuilder
@@ -38,6 +45,12 @@ class DIALOG_OUTSET_ITEMS : public DIALOG_OUTSET_ITEMS_BASE
 public:
     DIALOG_OUTSET_ITEMS( PCB_BASE_FRAME& aParent, OUTSET_ROUTINE::PARAMETERS& aParams );
     ~DIALOG_OUTSET_ITEMS();
+
+#ifdef __EMSCRIPTEN__
+    /// Asks the host first (host_prompt.h, ask outset, modal); KiCad's own window only when
+    /// nobody takes the ask.
+    int ShowModal() override;
+#endif
 
 protected:
     bool TransferDataToWindow() override;

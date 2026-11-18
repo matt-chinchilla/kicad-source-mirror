@@ -23,6 +23,10 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: ActionFor, an inline accessor of the tool action
+ * an item id stands for, read by the in-browser editor's context menu model (WebAssembly build
+ * only).
  */
 
 #pragma once
@@ -199,6 +203,19 @@ public:
     void OnIdle( wxIdleEvent& event );
 
     virtual bool PassHelpTextToHandler() { return false; }
+
+#ifdef __EMSCRIPTEN__
+    /**
+     * The tool action this menu's own item @a aId stands for (this menu only, never a
+     * submenu), or nullptr. Read by the in-browser editor's context menu model
+     * (tool/host_context_menu.h).
+     */
+    const TOOL_ACTION* ActionFor( int aId ) const
+    {
+        const auto it = m_toolActions.find( aId );
+        return it != m_toolActions.end() ? it->second : nullptr;
+    }
+#endif
 
     static constexpr bool NORMAL = false;
     static constexpr bool CHECK  = true;

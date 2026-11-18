@@ -19,6 +19,9 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: FOOTPRINT::FootprintNeedsUpdate tags each of its
+ * report lines with a code, item and pad number for a CC_DIFF_REPORTER (WebAssembly build only).
  */
 
 #include <layer_range.h>
@@ -38,6 +41,10 @@
 #include <drc/drc_test_provider.h>
 #include <project_pcb.h>
 #include <string_utils.h>
+
+#ifdef __EMSCRIPTEN__
+#include <cc_diff_finding.h>
+#endif
 
 
 /*
@@ -808,13 +815,22 @@ bool FOOTPRINT::FootprintNeedsUpdate( const FOOTPRINT* aLibFP, int aCompareFlags
     aLibFP = temp.get();
 
     // These checks don't set off errors, they're just informational
+#ifdef __EMSCRIPTEN__
+    CcDiffTag( aReporter, "boardStackup" );
+#endif
     footprintVsBoardStackup( *this, *GetBoard(), aReporter );
 
 #define TEST_ATTR( a, b, attr, msg ) TEST( ( a & attr ), ( b & attr ), msg )
 
+#ifdef __EMSCRIPTEN__
+    CcDiffTag( aReporter, "attributes", nullptr, wxEmptyString, wxS( "type" ) );
+#endif
     TEST_ATTR( GetAttributes(), aLibFP->GetAttributes(), (FP_THROUGH_HOLE | FP_SMD),
                _( "Footprint types differ." ) );
 
+#ifdef __EMSCRIPTEN__
+    CcDiffTag( aReporter, "attributes", nullptr, wxEmptyString, wxS( "allowSolderMaskBridges" ) );
+#endif
     TEST( AllowSolderMaskBridges(), aLibFP->AllowSolderMaskBridges(),
           wxString::Format( _( "'%s' settings differ." ),
                             _( "Allow bridged solder mask apertures between pads" ) ) );
@@ -822,18 +838,30 @@ bool FOOTPRINT::FootprintNeedsUpdate( const FOOTPRINT* aLibFP, int aCompareFlags
     if( !( aCompareFlags & COMPARE_FLAGS::DRC ) )
     {
         // These tests are skipped for DRC: they are presumed to relate to a given design.
+#ifdef __EMSCRIPTEN__
+        CcDiffTag( aReporter, "attributes", nullptr, wxEmptyString, wxS( "boardOnly" ) );
+#endif
         TEST_ATTR( GetAttributes(), aLibFP->GetAttributes(), FP_BOARD_ONLY,
                    wxString::Format( _( "'%s' settings differ." ),
                                      _( "Not in schematic" ) ) );
 
+#ifdef __EMSCRIPTEN__
+        CcDiffTag( aReporter, "excludePos" );
+#endif
         TEST_ATTR( GetAttributes(), aLibFP->GetAttributes(), FP_EXCLUDE_FROM_POS_FILES,
                    wxString::Format( _( "'%s' settings differ." ),
                                      _( "Exclude from position files" ) ) );
 
+#ifdef __EMSCRIPTEN__
+        CcDiffTag( aReporter, "excludeBom" );
+#endif
         TEST_ATTR( GetAttributes(), aLibFP->GetAttributes(), FP_EXCLUDE_FROM_BOM,
                    wxString::Format( _( "'%s' settings differ." ),
                                      _( "Exclude from bill of materials" ) ) );
 
+#ifdef __EMSCRIPTEN__
+        CcDiffTag( aReporter, "dnp" );
+#endif
         TEST_ATTR( GetAttributes(), aLibFP->GetAttributes(), FP_DNP,
                    wxString::Format( _( "'%s' settings differ." ),
                                      _( "Do not populate" ) ) );
@@ -842,6 +870,9 @@ bool FOOTPRINT::FootprintNeedsUpdate( const FOOTPRINT* aLibFP, int aCompareFlags
 #define REPORT( msg ) { if( aReporter ) aReporter->Report( msg ); }
 #define CHECKPOINT { if( diff && !aReporter ) return diff; }
 
+#ifdef __EMSCRIPTEN__
+    CcDiffTag( aReporter, "stackup" );
+#endif
     if( stackupNeedsUpdate( *this, *aLibFP, aReporter ) )
     {
         diff = true;
@@ -863,6 +894,9 @@ bool FOOTPRINT::FootprintNeedsUpdate( const FOOTPRINT* aLibFP, int aCompareFlags
         if( GetLocalClearance().has_value() && GetLocalClearance() != aLibFP->GetLocalClearance() )
         {
             diff = true;
+#ifdef __EMSCRIPTEN__
+            CcDiffTag( aReporter, "override", nullptr, wxEmptyString, wxS( "clearance" ) );
+#endif
             REPORT( _( "Pad clearance overridden." ) );
         }
 
@@ -870,6 +904,9 @@ bool FOOTPRINT::FootprintNeedsUpdate( const FOOTPRINT* aLibFP, int aCompareFlags
                 && GetLocalSolderMaskMargin() != aLibFP->GetLocalSolderMaskMargin() )
         {
             diff = true;
+#ifdef __EMSCRIPTEN__
+            CcDiffTag( aReporter, "override", nullptr, wxEmptyString, wxS( "solderMask" ) );
+#endif
             REPORT( _( "Solder mask expansion overridden." ) );
         }
 
@@ -878,6 +915,9 @@ bool FOOTPRINT::FootprintNeedsUpdate( const FOOTPRINT* aLibFP, int aCompareFlags
                 && GetLocalSolderPasteMargin() != aLibFP->GetLocalSolderPasteMargin() )
         {
             diff = true;
+#ifdef __EMSCRIPTEN__
+            CcDiffTag( aReporter, "override", nullptr, wxEmptyString, wxS( "solderPaste" ) );
+#endif
             REPORT( _( "Solder paste absolute clearance overridden." ) );
         }
 
@@ -885,6 +925,9 @@ bool FOOTPRINT::FootprintNeedsUpdate( const FOOTPRINT* aLibFP, int aCompareFlags
                 && GetLocalSolderPasteMarginRatio() != aLibFP->GetLocalSolderPasteMarginRatio() )
         {
             diff = true;
+#ifdef __EMSCRIPTEN__
+            CcDiffTag( aReporter, "override", nullptr, wxEmptyString, wxS( "solderPasteRatio" ) );
+#endif
             REPORT( _( "Solder paste relative clearance overridden." ) );
         }
 
@@ -892,10 +935,16 @@ bool FOOTPRINT::FootprintNeedsUpdate( const FOOTPRINT* aLibFP, int aCompareFlags
                 && GetLocalZoneConnection() != aLibFP->GetLocalZoneConnection() )
         {
             diff = true;
+#ifdef __EMSCRIPTEN__
+            CcDiffTag( aReporter, "override", nullptr, wxEmptyString, wxS( "zoneConnection" ) );
+#endif
             REPORT( _( "Zone connection overridden." ) );
         }
     }
 
+#ifdef __EMSCRIPTEN__
+    CcDiffTag( aReporter, "netTie" );
+#endif
     TEST( GetNetTiePadGroups().size(), aLibFP->GetNetTiePadGroups().size(),
           _( "Net tie pad groups differ." ) );
 
@@ -949,6 +998,9 @@ bool FOOTPRINT::FootprintNeedsUpdate( const FOOTPRINT* aLibFP, int aCompareFlags
     if( aShapes.size() != bShapes.size() )
     {
         diff = true;
+#ifdef __EMSCRIPTEN__
+        CcDiffTag( aReporter, "graphicCount" );
+#endif
         REPORT( _( "Graphic item count differs." ) );
     }
     else
@@ -963,6 +1015,9 @@ bool FOOTPRINT::FootprintNeedsUpdate( const FOOTPRINT* aLibFP, int aCompareFlags
             if( shapeNeedsUpdate( *curr_shape, *test_shape ) )
             {
                 diff = true;
+#ifdef __EMSCRIPTEN__
+                CcDiffTag( aReporter, "shape", &( *aIt )->m_Uuid );
+#endif
                 REPORT( wxString::Format( _( "%s differs." ), ITEM_DESC( *aIt ) ) );
             }
         }
@@ -989,6 +1044,9 @@ bool FOOTPRINT::FootprintNeedsUpdate( const FOOTPRINT* aLibFP, int aCompareFlags
     if( aBarcodes.size() != bBarcodes.size() )
     {
         diff = true;
+#ifdef __EMSCRIPTEN__
+        CcDiffTag( aReporter, "barcodeCount" );
+#endif
         REPORT( _( "Barcode count differs." ) );
     }
     else
@@ -1003,6 +1061,9 @@ bool FOOTPRINT::FootprintNeedsUpdate( const FOOTPRINT* aLibFP, int aCompareFlags
             if( barcodeNeedsUpdate( *curr_barcode, *test_barcode ) )
             {
                 diff = true;
+#ifdef __EMSCRIPTEN__
+                CcDiffTag( aReporter, "barcode", &( *aIt )->m_Uuid );
+#endif
                 REPORT( wxString::Format( _( "%s differs." ), ITEM_DESC( *aIt ) ) );
             }
         }
@@ -1016,12 +1077,18 @@ bool FOOTPRINT::FootprintNeedsUpdate( const FOOTPRINT* aLibFP, int aCompareFlags
     if( aPads.size() != bLibPads.size() )
     {
         diff = true;
+#ifdef __EMSCRIPTEN__
+        CcDiffTag( aReporter, "padCount" );
+#endif
         REPORT( _( "Pad count differs." ) );
     }
     else
     {
         for( auto aIt = aPads.begin(), bLibIt = bLibPads.begin(); aIt != aPads.end(); aIt++, bLibIt++ )
         {
+#ifdef __EMSCRIPTEN__
+            CcDiffTag( aReporter, "pad", &( *aIt )->m_Uuid, ( *aIt )->GetNumber() );
+#endif
             if( padNeedsUpdate( *aIt, *bLibIt, aReporter ) )
                 diff = true;
             else if( aReporter && padHasOverrides( *aIt, *bLibIt, *aReporter ) )
@@ -1037,12 +1104,23 @@ bool FOOTPRINT::FootprintNeedsUpdate( const FOOTPRINT* aLibFP, int aCompareFlags
     if( aZones.size() != bZones.size() )
     {
         diff = true;
+#ifdef __EMSCRIPTEN__
+        CcDiffTag( aReporter, "ruleAreaCount" );
+#endif
         REPORT( _( "Rule area count differs." ) );
     }
     else
     {
+#ifdef __EMSCRIPTEN__
+        for( auto aIt = aZones.begin(), bIt = bZones.begin(); aIt != aZones.end(); aIt++, bIt++ )
+        {
+            CcDiffTag( aReporter, "ruleArea", &( *aIt )->m_Uuid );
+            diff |= zoneNeedsUpdate( *aIt, *bIt, aReporter );
+        }
+#else
         for( auto aIt = aZones.begin(), bIt = bZones.begin(); aIt != aZones.end(); aIt++, bIt++ )
             diff |= zoneNeedsUpdate( *aIt, *bIt, aReporter );
+#endif
     }
 
     return diff;

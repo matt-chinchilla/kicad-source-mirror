@@ -19,6 +19,9 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: DIALOG_TABLE_PROPERTIES declares a ShowModal and
+ * a ShowQuasiModal that ask the in-browser editor's host first (WebAssembly build only).
  */
 
 #ifndef DIALOG_TABLE_PROPERTIES_H
@@ -43,7 +46,22 @@ public:
     DIALOG_TABLE_PROPERTIES( PCB_BASE_EDIT_FRAME* aParentFrame, PCB_TABLE* aTable );
     ~DIALOG_TABLE_PROPERTIES();
 
+#ifdef __EMSCRIPTEN__
+    /// Ask the in-browser editor's host first (host_prompt.h, ask "table"); KiCad's dialog
+    /// only when the host does not take it.
+    int ShowModal() override;
+    int ShowQuasiModal();
+#endif
+
 private:
+#ifdef __EMSCRIPTEN__
+    /// 1 answered, 0 canceled, -1 not taken (CcHostPromptModal).
+    int ccAskHost();
+
+    /// True when the grid's cell at aRow, aCol stands for a cell a merge covers.
+    bool ccCoveredCell( int aRow, int aCol ) const;
+#endif
+
     void sizeGridToTable();
 
     bool TransferDataToWindow() override;

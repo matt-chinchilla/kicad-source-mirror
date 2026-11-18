@@ -19,10 +19,18 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: WX_TEXT_ENTRY_DIALOG asks the in-browser editor's
+ * host to answer it (host_prompt.h, ask entry) before KiCad's own dialog shows (WebAssembly build
+ * only).
  */
 
 #include <dialogs/dialog_text_entry.h>
 #include <string_utils.h>
+
+#ifdef __EMSCRIPTEN__
+#include <host_prompt.h>
+#endif
 
 
 WX_TEXT_ENTRY_DIALOG::WX_TEXT_ENTRY_DIALOG( wxWindow* aParent, const wxString& aFieldLabel,
@@ -68,3 +76,79 @@ wxString WX_TEXT_ENTRY_DIALOG::GetValue() const
 }
 
 
+
+
+#ifdef __EMSCRIPTEN__
+int WX_TEXT_ENTRY_DIALOG::ShowModal()
+{
+    TransferDataToWindow();
+
+    nlohmann::json field;
+    field["key"] = "value";
+    field["label"] = m_label->IsShown() ? m_label->GetLabel().ToStdString( wxConvUTF8 )
+                                        : std::string();
+    field["kind"] = "text";
+    field["value"] = GetValue().ToStdString( wxConvUTF8 );
+    field["tip"] = m_textCtrl->GetToolTipText().ToStdString( wxConvUTF8 );
+
+    nlohmann::json record;
+    record["title"] = GetTitle().ToStdString( wxConvUTF8 );
+    record["fields"] = nlohmann::json::array( { field } );
+
+    class RECEIVER : public CC_PROMPT_RECEIVER
+    {
+    public:
+        explicit RECEIVER( WX_TEXT_ENTRY_DIALOG* aDialog ) : m_dialog( aDialog ) {}
+
+        bool CcApply( const nlohmann::json& aAnswer, std::string& aField ) override
+        {
+            aField = "value";
+
+            if( !aAnswer.is_object() || !aAnswer.contains( "values" )
+                || !aAnswer["values"].is_object() )
+            {
+                aField.clear();
+                return false;
+            }
+
+            const nlohmann::json& values = aAnswer["values"];
+
+            if( values.contains( "value" ) )
+            {
+                if( !values["value"].is_string() )
+                    return false;
+
+                m_dialog->m_textCtrl->SetValue(
+                        wxString::FromUTF8( values["value"].get<std::string>() ) );
+            }
+
+            // The caller's validator, asked for its sentence rather than its message box.
+            if( wxTextValidator* validator =
+                        dynamic_cast<wxTextValidator*>( m_dialog->m_textCtrl->GetValidator() ) )
+            {
+                const wxString error = validator->IsValid( m_dialog->m_textCtrl->GetValue() );
+
+                if( !error.IsEmpty() )
+                {
+                    CcPromptCaptureMessage( error.ToStdString( wxConvUTF8 ) );
+                    return false;
+                }
+            }
+
+            return m_dialog->TransferDataFromWindow();
+        }
+
+    private:
+        WX_TEXT_ENTRY_DIALOG* m_dialog;
+    };
+
+    RECEIVER receiver( this );
+
+    switch( CcHostPromptModal( "entry", record, receiver ) )
+    {
+    case 1:  SetReturnCode( wxID_OK );     return wxID_OK;
+    case 0:  SetReturnCode( wxID_CANCEL ); return wxID_CANCEL;
+    default: return WX_TEXT_ENTRY_DIALOG_BASE::ShowModal();
+    }
+}
+#endif // __EMSCRIPTEN__

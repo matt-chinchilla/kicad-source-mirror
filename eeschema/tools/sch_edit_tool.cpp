@@ -3,6 +3,8 @@
  *
  * Copyright (C) 2019 CERN
  * Copyright The KiCad Developers, see AUTHORS.txt for contributors.
+ * Modified by Circuit Center Inc on 2026-11-18: every non symbol item asks the in-browser
+ * editor's host (window.kicadHostSchItem) before its properties dialog (under __EMSCRIPTEN__).
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -79,6 +81,12 @@
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #include <json_common.h>
+#include <tools/sch_item_host.h>
+
+// Set while Properties hands one item to EditProperties after it asked the host for that
+// item itself, so the host is asked once per request (engine run 15, cap schItem). A lone
+// label field is not asked by Properties: EditProperties asks for its label.
+static bool s_ccSchItemAsked = false;
 #endif
 
 
@@ -2656,6 +2664,40 @@ int SCH_EDIT_TOOL::Properties( const TOOL_EVENT& aEvent )
             return 0;
         }
     }
+
+    // Engine run 15: every other item the host names (CcSchItemKind) asks the host first, for
+    // a selection of one or more items all of that one kind, with the first's uuid. A held
+    // request opens no dialog and keeps the selection. ccAsked records that the host was asked,
+    // so EditProperties does not ask it a second time for the same request.
+    bool ccAsked = false;
+
+    if( const char* kind = CcSchItemKind( selection.Front() ) )
+    {
+        bool oneKind = true;
+
+        for( EDA_ITEM* item : selection.Items() )
+        {
+            const char* itemKind = CcSchItemKind( item );
+
+            if( !itemKind || std::string( itemKind ) != kind )
+            {
+                oneKind = false;
+                break;
+            }
+        }
+
+        if( oneKind )
+        {
+            ccAsked = true;
+
+            if( CcAskHostSchItem( kind, selection.Front()->m_Uuid,
+                                  m_frame->GetCurrentSheet().PathAsString(), false ) )
+            {
+                selection.SetIsHover( false );
+                return 0;
+            }
+        }
+    }
 #endif
 
     switch( curr_item->Type() )
@@ -2744,7 +2786,13 @@ int SCH_EDIT_TOOL::Properties( const TOOL_EVENT& aEvent )
         if( selection.Size() > 1 )
             return 0;
 
+#ifdef __EMSCRIPTEN__
+        s_ccSchItemAsked = ccAsked;
         EditProperties( curr_item );
+        s_ccSchItemAsked = false;
+#else
+        EditProperties( curr_item );
+#endif
     }
 
     if( clearSelection )
@@ -2756,6 +2804,28 @@ int SCH_EDIT_TOOL::Properties( const TOOL_EVENT& aEvent )
 
 void SCH_EDIT_TOOL::EditProperties( EDA_ITEM* aItem )
 {
+#ifdef __EMSCRIPTEN__
+    // Engine run 15: the host is asked before each kind's dialog (a double click, a label's
+    // field through editFieldText), unless Properties asked it for this request already.
+    if( !s_ccSchItemAsked )
+    {
+        EDA_ITEM* asked = aItem;
+
+        if( asked->Type() == SCH_FIELD_T && asked->GetParent()
+                && CcSchItemKind( asked->GetParent() )
+                && std::string( CcSchItemKind( asked->GetParent() ) ) == "label" )
+        {
+            asked = asked->GetParent();
+        }
+
+        if( CcAskHostSchItem( CcSchItemKind( asked ), asked->m_Uuid,
+                              m_frame->GetCurrentSheet().PathAsString(), false ) )
+        {
+            return;
+        }
+    }
+#endif
+
     switch( aItem->Type() )
     {
     case SCH_SYMBOL_T:
