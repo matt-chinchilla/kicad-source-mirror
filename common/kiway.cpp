@@ -20,6 +20,11 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: under __EMSCRIPTEN__, KIWAY::Player hands the
+ * frame the engine boots (created while no frame is the top yet) to the start-up hook of
+ * cc_boot_chrome.h before anyone shows it, so the page's start-up input can hold KiCad's
+ * chrome hidden from the first frame on.
  */
 
 #include <cstring>
@@ -38,6 +43,10 @@
 #include <settings/settings_manager.h>
 #include <tool/action_manager.h>
 #include <logging.h>
+
+#ifdef __EMSCRIPTEN__
+#include <cc_boot_chrome.h>
+#endif
 #include <local_history.h>
 
 #include <wx/dynlib.h>
@@ -481,6 +490,16 @@ KIWAY_PLAYER* KIWAY::Player( FRAME_T aFrameType, bool doCreate, wxTopLevelWindow
                                             );
             if( frame )
                 m_playerFrameId[aFrameType].store( frame->GetId() );
+
+#ifdef __EMSCRIPTEN__
+            // The frame the engine boots (no frame is the top yet), still hidden: the start-up
+            // hook may hold KiCad's chrome hidden before single_top.cpp shows it.
+            if( frame && !m_top )
+            {
+                if( CC_BOOT_FRAME_HOOK hook = ccBootFrameHook() )
+                    hook( frame );
+            }
+#endif
 
             return frame;
         }
