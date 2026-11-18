@@ -21,6 +21,10 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: under __EMSCRIPTEN__ the footprint editor's
+ * new text, text box, table, barcode, reference picture and Import Graphics ask the
+ * WebAssembly editor's host (window.kicadHostFpEdit) before KiCad's dialogs.
  */
 
 #include "drawing_tool.h"
@@ -88,6 +92,22 @@
 #include <zone.h>
 #include <fix_board_shape.h>
 #include <view/view_controls.h>
+
+#ifdef __EMSCRIPTEN__
+#include <tools/footprint_editor_host.h>
+
+
+// A new item's dialog goes to the WebAssembly editor's host first (engine run 15): in the
+// footprint editor through window.kicadHostFpEdit with isNew true. aItem is the new item (its
+// uuid asked), nullptr for a picture not made yet. True when the host took it: no dialog.
+static bool ccAskHostNewItem( bool aFootprintEditor, const char* aAsk, const EDA_ITEM* aItem )
+{
+    if( aFootprintEditor )
+        return CcAskHostFpEdit( aAsk, aItem ? &aItem->m_Uuid : nullptr, true );
+
+    return false;
+}
+#endif
 
 const unsigned int DRAWING_TOOL::COORDS_PADDING = pcbIUScale.mmToIU( 20 );
 
@@ -440,8 +460,20 @@ int DRAWING_TOOL::DrawRectangle( const TOOL_EVENT& aEvent )
         {
             bool cancelled = false;
 
+#ifdef __EMSCRIPTEN__
+            // The host edits the new text box in its own window: held, it goes down as drawn
+            // reading "Text" and no dialog opens.
+            if( PCB_TEXTBOX* textbox = dynamic_cast<PCB_TEXTBOX*>( rect ) )
+            {
+                if( ccAskHostNewItem( m_isFootprintEditor, "textbox", textbox ) )
+                    textbox->SetText( wxT( "Text" ) );
+                else
+                    cancelled = m_frame->ShowTextBoxPropertiesDialog( textbox ) != wxID_OK;
+            }
+#else
             if( PCB_TEXTBOX* textbox = dynamic_cast<PCB_TEXTBOX*>( rect ) )
                 cancelled = m_frame->ShowTextBoxPropertiesDialog( textbox ) != wxID_OK;
+#endif
 
             if( cancelled )
             {
@@ -754,6 +786,17 @@ int DRAWING_TOOL::PlaceReferenceImage( const TOOL_EVENT& aEvent )
             if( !image )
             {
                 m_toolMgr->RunAction( ACTIONS::selectionClear );
+
+#ifdef __EMSCRIPTEN__
+                // The host chooses the picture in its own window and places it with the file
+                // (its place export runs this tool with the picture as the parameter): held,
+                // nothing is placed and the tool ends.
+                if( ccAskHostNewItem( m_isFootprintEditor, "image", nullptr ) )
+                {
+                    m_frame->PopTool( aEvent );
+                    break;
+                }
+#endif
 
                 wxFileDialog dlg( m_frame, _( "Choose Image" ), wxEmptyString, wxEmptyString,
                                   FILEEXT::ImageFileWildcard(), wxFD_OPEN );
@@ -1074,6 +1117,28 @@ int DRAWING_TOOL::PlaceText( const TOOL_EVENT& aEvent )
                 text->SetTextPos( cursorPos );
                 text->SetFlags( IS_NEW ); // Prevent double undo commits
 
+#ifdef __EMSCRIPTEN__
+                // The host edits the new text in its own window: held, the text goes down
+                // where it was clicked reading "Text" (one commit) and no dialog opens.
+                const bool ccHeld = ccAskHostNewItem( m_isFootprintEditor, "text", text );
+                bool       cancelled = false;
+
+                if( ccHeld )
+                {
+                    text->SetText( wxT( "Text" ) );
+                }
+                else
+                {
+                    DIALOG_TEXT_PROPERTIES textDialog( m_frame, text );
+
+                    RunMainStack(
+                            [&]()
+                            {
+                                // QuasiModal required for Scintilla auto-complete
+                                cancelled = textDialog.ShowQuasiModal() != wxID_OK;
+                            } );
+                }
+#else
                 DIALOG_TEXT_PROPERTIES textDialog( m_frame, text );
                 bool                   cancelled;
 
@@ -1083,6 +1148,7 @@ int DRAWING_TOOL::PlaceText( const TOOL_EVENT& aEvent )
                             // QuasiModal required for Scintilla auto-complete
                             cancelled = textDialog.ShowQuasiModal() != wxID_OK;
                         } );
+#endif
 
                 if( cancelled || NoPrintableChars( text->GetText() ) )
                 {
@@ -1095,6 +1161,12 @@ int DRAWING_TOOL::PlaceText( const TOOL_EVENT& aEvent )
                     // Otherwise we'll drag.
                     placing = true;
                 }
+#ifdef __EMSCRIPTEN__
+                else if( ccHeld )
+                {
+                    placing = true;
+                }
+#endif
 
                 if( text )
                 {
@@ -1321,6 +1393,23 @@ int DRAWING_TOOL::DrawTable( const TOOL_EVENT& aEvent )
 
                 table->Normalize();
 
+#ifdef __EMSCRIPTEN__
+                // The host edits the new table in its own window: held, the table is placed
+                // as drawn, with KiCad's rows and columns, and no dialog opens.
+                bool cancelled = false;
+
+                if( !ccAskHostNewItem( m_isFootprintEditor, "table", table ) )
+                {
+                    DIALOG_TABLE_PROPERTIES dlg( m_frame, table );
+
+                    RunMainStack(
+                            [&]()
+                            {
+                                // QuasiModal required for Scintilla auto-complete
+                                cancelled = dlg.ShowQuasiModal() != wxID_OK;
+                            } );
+                }
+#else
                 DIALOG_TABLE_PROPERTIES dlg( m_frame, table );
                 bool                    cancelled;
 
@@ -1330,6 +1419,7 @@ int DRAWING_TOOL::DrawTable( const TOOL_EVENT& aEvent )
                             // QuasiModal required for Scintilla auto-complete
                             cancelled = dlg.ShowQuasiModal() != wxID_OK;
                         } );
+#endif
 
                 if( cancelled )
                 {
@@ -1531,6 +1621,22 @@ int DRAWING_TOOL::DrawBarcode( const TOOL_EVENT& aEvent )
             barcode->SetPosition( cursorPos );
             barcode->SetTextSize( bds.GetTextSize( layer ).y );
 
+#ifdef __EMSCRIPTEN__
+            // The host edits the new barcode in its own window: held, it is placed with its
+            // defaults where it was clicked and no dialog opens.
+            bool cancelled = false;
+
+            if( !ccAskHostNewItem( m_isFootprintEditor, "barcode", barcode ) )
+            {
+                DIALOG_BARCODE_PROPERTIES dlg( m_frame, barcode );
+
+                RunMainStack(
+                        [&]()
+                        {
+                            cancelled = dlg.ShowModal() != wxID_OK;
+                        } );
+            }
+#else
             DIALOG_BARCODE_PROPERTIES dlg( m_frame, barcode );
             bool                      cancelled;
 
@@ -1539,6 +1645,7 @@ int DRAWING_TOOL::DrawBarcode( const TOOL_EVENT& aEvent )
                     {
                         cancelled = dlg.ShowModal() != wxID_OK;
                     } );
+#endif
 
             if( cancelled )
             {
@@ -2050,6 +2157,13 @@ int DRAWING_TOOL::PlaceImportedGraphics( const TOOL_EVENT& aEvent )
         return 0;
 
     REENTRANCY_GUARD guard( &m_inDrawingTool );
+
+#ifdef __EMSCRIPTEN__
+    // The footprint editor's host imports a drawing from its own page (kicadImportGraphics):
+    // held, no dialog. The board frame's door is the island's held action.
+    if( m_isFootprintEditor && CcAskHostFpEdit( "graphics", nullptr, false ) )
+        return 0;
+#endif
 
     DIALOG_IMPORT_GRAPHICS dlg( m_frame );
 
