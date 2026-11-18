@@ -4,6 +4,9 @@
  * Copyright (C) 2014-2016 CERN
  * Copyright The KiCad Developers, see AUTHORS.txt for contributors.
  * @author Maciej Suminski <maciej.suminski@cern.ch>
+ * Modified by Circuit Center Inc on 2026-11-18: in the WebAssembly editor Place Design Block
+ * takes a block the host handed in (cc_host_design_block.h) before the Design Blocks pane, with
+ * the host's place as group option in place of the chooser's setting (engine run 15, K-B1).
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -96,6 +99,20 @@
 
 
 using namespace std::placeholders;
+
+#ifdef __EMSCRIPTEN__
+#include <cc_host_design_block.h>
+
+// K-B1: while a host block is appended, its place as group option stands in for the Design
+// Blocks chooser's setting that AppendBoard reads (-1: none, the chooser's setting is read).
+static int s_ccHostPlaceAsGroup = -1;
+
+struct CC_HOST_PLACE_AS_GROUP
+{
+    explicit CC_HOST_PLACE_AS_GROUP( bool aAsGroup ) { s_ccHostPlaceAsGroup = aAsGroup ? 1 : 0; }
+    ~CC_HOST_PLACE_AS_GROUP() { s_ccHostPlaceAsGroup = -1; }
+};
+#endif
 
 
 // files.cpp
@@ -1415,6 +1432,29 @@ int PCB_CONTROL::AppendDesignBlock( const TOOL_EVENT& aEvent )
     if( !editFrame )
         return 1;
 
+#ifdef __EMSCRIPTEN__
+    // K-B1: a block the host handed in (kicadDesignBlockPlace) is placed first, with the host's
+    // options and no pane read; KiCad's checks stand, its info bar lines do not show (the host
+    // checked the block's files before it handed it in). One placement, never repeated.
+    CC_HOST_DESIGN_BLOCK_OPTIONS  hostOptions;
+    std::unique_ptr<DESIGN_BLOCK> hostBlock = ccTakeHostDesignBlock( &hostOptions );
+
+    if( hostBlock )
+    {
+        if( hostBlock->GetBoardFile().IsEmpty() || !wxFileName::FileExists( hostBlock->GetBoardFile() ) )
+            return 1;
+
+        IO_RELEASER<PCB_IO> hostPi( PCB_IO_MGR::FindPlugin( PCB_IO_MGR::KICAD_SEXP ) );
+
+        if( !hostPi )
+            return 1;
+
+        CC_HOST_PLACE_AS_GROUP asGroup( hostOptions.asGroup );
+
+        return AppendBoard( *hostPi, hostBlock->GetBoardFile(), hostBlock.get() );
+    }
+#endif
+
     if( !editFrame->GetDesignBlockPane()->GetSelectedLibId().IsValid() )
         return 1;
 
@@ -2196,6 +2236,11 @@ int PCB_CONTROL::AppendBoard( PCB_IO& pi, const wxString& fileName, DESIGN_BLOCK
 
     if( APP_SETTINGS_BASE* cfg = editFrame->config() )
         placeAsGroup = cfg->m_DesignBlockChooserPanel.place_as_group;
+
+#ifdef __EMSCRIPTEN__
+    if( s_ccHostPlaceAsGroup >= 0 )
+        placeAsGroup = s_ccHostPlaceAsGroup == 1;
+#endif
 
     if( placeBoardItems( commit, brd, false, false /* Don't reannotate dupes on Append Board */, aSkipMove ) )
     {
