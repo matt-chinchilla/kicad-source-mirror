@@ -979,6 +979,9 @@ int PCBNEW_JOBS_HANDLER::JobExportRender( JOB* aJob )
 #else
 namespace
 {
+/// The largest side of a rendered picture in this build, in pixels (the host's bound).
+constexpr int CC_RENDER_MAX_SIDE = 4096;
+
 // Token waits live in the wx wasm port (evtloop.cpp).
 extern "C" int wxWasmBeginWait( const char* aKind );
 extern "C" int wxWasmYieldUntil( int aToken );
@@ -1068,7 +1071,11 @@ static int ccJobExportRender( JOB* aJob, REPORTER* aReporter,
 
     // Reject width and height being invalid
     // Final bit of sanity because this can blow things up
-    if( aRenderJob->m_width <= 0 || aRenderJob->m_height <= 0 )
+    // In this build the size comes from the host's job settings (cc_output_render.h refuses a
+    // side outside 16 to 4,096 before this runs); bounded here too, so no size overflows the
+    // buffers below.
+    if( aRenderJob->m_width <= 0 || aRenderJob->m_height <= 0
+            || aRenderJob->m_width > CC_RENDER_MAX_SIDE || aRenderJob->m_height > CC_RENDER_MAX_SIDE )
     {
         aReporter->Report( _( "Invalid image dimensions" ), RPT_SEVERITY_ERROR );
         return CLI::EXIT_CODES::ERR_ARGS;
@@ -1300,10 +1307,20 @@ static int ccJobExportRender( JOB* aJob, REPORTER* aReporter,
 
     if( rgbaBuffer )
     {
-        const unsigned int wxh = realSize.x * realSize.y;
+        const size_t wxh = static_cast<size_t>( std::max( realSize.x, 0 ) )
+                           * static_cast<size_t>( std::max( realSize.y, 0 ) );
 
-        unsigned char* rgbBuffer = (unsigned char*) malloc( wxh * 3 );
-        unsigned char* alphaBuffer = (unsigned char*) malloc( wxh );
+        unsigned char* rgbBuffer = wxh ? (unsigned char*) malloc( wxh * 3 ) : nullptr;
+        unsigned char* alphaBuffer = wxh ? (unsigned char*) malloc( wxh ) : nullptr;
+
+        if( !rgbBuffer || !alphaBuffer )
+        {
+            free( rgbBuffer );
+            free( alphaBuffer );
+            aReporter->Report( _( "Error creating 3D render image" ) + wxS( "\n" ),
+                               RPT_SEVERITY_ERROR );
+            return CLI::EXIT_CODES::ERR_UNKNOWN;
+        }
 
         unsigned char* rgbaPtr = rgbaBuffer;
         unsigned char* rgbPtr = rgbBuffer;
@@ -1330,8 +1347,9 @@ static int ccJobExportRender( JOB* aJob, REPORTER* aReporter,
         image = image.Mirror( false );
 
         image.SetOption( wxIMAGE_OPTION_QUALITY, 90 );
-        image.SaveFile( outPath, aRenderJob->m_format == JOB_PCB_RENDER::FORMAT::PNG ? wxBITMAP_TYPE_PNG
-                                                                                     : wxBITMAP_TYPE_JPEG );
+        success = image.SaveFile( outPath, aRenderJob->m_format == JOB_PCB_RENDER::FORMAT::PNG
+                                                   ? wxBITMAP_TYPE_PNG
+                                                   : wxBITMAP_TYPE_JPEG );
     }
 
     if( success )
