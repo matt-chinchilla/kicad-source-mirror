@@ -24,7 +24,9 @@
  *
  * Modified by Circuit Center Inc on 2026-11-18: under __EMSCRIPTEN__ the footprint editor's
  * new text, text box, table, barcode, reference picture and Import Graphics ask the
- * WebAssembly editor's host (window.kicadHostFpEdit) before KiCad's dialogs.
+ * WebAssembly editor's host (window.kicadHostFpEdit) before KiCad's dialogs, and the board
+ * editor's new text, text box, barcode and reference picture ask it too
+ * (window.kicadHostBoardItem).
  */
 
 #include "drawing_tool.h"
@@ -95,17 +97,25 @@
 
 #ifdef __EMSCRIPTEN__
 #include <tools/footprint_editor_host.h>
+#include <tools/board_item_host.h>
 
 
 // A new item's dialog goes to the WebAssembly editor's host first (engine run 15): in the
-// footprint editor through window.kicadHostFpEdit with isNew true. aItem is the new item (its
-// uuid asked), nullptr for a picture not made yet. True when the host took it: no dialog.
+// footprint editor through window.kicadHostFpEdit, in the board editor through
+// window.kicadHostBoardItem, each with isNew true. aItem is the new item (its uuid asked),
+// nullptr for a picture not made yet. True when the host took it: no dialog. The board editor's
+// new table is not asked here: KiCad's table dialog asks the prompt host itself.
 static bool ccAskHostNewItem( bool aFootprintEditor, const char* aAsk, const EDA_ITEM* aItem )
 {
-    if( aFootprintEditor )
-        return CcAskHostFpEdit( aAsk, aItem ? &aItem->m_Uuid : nullptr, true );
+    const KIID* uuid = aItem ? &aItem->m_Uuid : nullptr;
 
-    return false;
+    if( aFootprintEditor )
+        return CcAskHostFpEdit( aAsk, uuid, true );
+
+    if( strcmp( aAsk, "table" ) == 0 || strcmp( aAsk, "graphics" ) == 0 )
+        return false;
+
+    return CcAskHostBoardItem( aAsk, uuid, true );
 }
 #endif
 

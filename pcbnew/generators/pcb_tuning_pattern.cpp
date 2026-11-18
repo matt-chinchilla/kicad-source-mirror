@@ -20,6 +20,11 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: under __EMSCRIPTEN__ the tuning tool's settings
+ * and a placed pattern's properties ask the WebAssembly editor's host
+ * (window.kicadHostBoardItem) before DIALOG_TUNING_PATTERN_PROPERTIES, and the host's Tuning
+ * form reads and sets the same settings the dialog shows and applies.
  */
 
 #include <pcb_generator.h>
@@ -79,6 +84,12 @@
 #include <project/tuning_profiles.h>
 #include <properties/property.h>
 #include <properties/property_mgr.h>
+
+#ifdef __EMSCRIPTEN__
+#include <tools/board_item_host.h>
+#include <pcb_base_edit_frame.h>
+#include <cmath>
+#endif
 
 TUNING_STATUS_VIEW_ITEM::TUNING_STATUS_VIEW_ITEM( PCB_BASE_EDIT_FRAME* aFrame ) :
         EDA_ITEM( NOT_USED ), // Never added to anything - just a preview
@@ -1827,8 +1838,397 @@ void PCB_TUNING_PATTERN::SetProperties( const STRING_ANY_MAP& aProps )
 }
 
 
+#ifdef __EMSCRIPTEN__
+// The host's Tuning form (engine run 15, pcbnew/tools/board_item_host.h): the settings
+// DIALOG_TUNING_PATTERN_PROPERTIES shows, as JSON, and a set applied as its OK applies them.
+// Lengths in mm, delays in ps.
+
+/** The live tuning tool's state while DRAWING_TOOL::PlaceTuningPattern runs, else null. */
+struct CC_TUNING_LIVE
+{
+    PNS::MEANDER_SETTINGS* settings;
+    PNS::ROUTER_MODE       mode;
+    PCB_TUNING_PATTERN**   pattern;
+    DRC_ENGINE*            drc;
+    TOOL_MANAGER*          toolMgr;
+};
+
+static CC_TUNING_LIVE*                              s_ccTuningLive = nullptr;
+static std::optional<nlohmann::json>                s_ccTuningPendingSet;
+static std::function<void( const nlohmann::json& )> s_ccTuningDone;
+
+
+static const char* ccTuningModeName( PNS::ROUTER_MODE aMode )
+{
+    switch( aMode )
+    {
+    case PNS::PNS_MODE_TUNE_DIFF_PAIR:      return "diffPair";
+    case PNS::PNS_MODE_TUNE_DIFF_PAIR_SKEW: return "skew";
+    default:                                return "single";
+    }
+}
+
+
+/** A length (mm) or delay (ps) from internal units. */
+static double ccTuningUnits( long long aIU, bool aTimeDomain )
+{
+    return aTimeDomain ? aIU / pcbIUScale.IU_PER_PS : aIU / pcbIUScale.IU_PER_MM;
+}
+
+
+template <typename T>
+static nlohmann::json ccTuningRange( const MINOPTMAX<T>& aRange, long long aUnconstrained,
+                                     bool aTimeDomain )
+{
+    nlohmann::json out = nlohmann::json::object();
+    const bool     open = aRange.IsNull() || aRange.Opt() == aUnconstrained;
+
+    out["min"] = ( open || !aRange.HasMin() ) ? nlohmann::json()
+                                              : nlohmann::json( ccTuningUnits( aRange.Min(), aTimeDomain ) );
+    out["opt"] = open ? nlohmann::json() : nlohmann::json( ccTuningUnits( aRange.Opt(), aTimeDomain ) );
+    out["max"] = ( open || !aRange.HasMax() ) ? nlohmann::json()
+                                              : nlohmann::json( ccTuningUnits( aRange.Max(), aTimeDomain ) );
+    return out;
+}
+
+
+/** The settings JSON: what the dialog would show for aSettings, aMode and the rules aRules. */
+static nlohmann::json ccTuningSettingsJson( const PNS::MEANDER_SETTINGS& aSettings,
+                                            PNS::ROUTER_MODE aMode, const DRC_CONSTRAINT& aRules )
+{
+    nlohmann::json out = nlohmann::json::object();
+    const bool     time = aSettings.m_isTimeDomain;
+
+    out["mode"] = ccTuningModeName( aMode );
+    out["minAmplitude"] = aSettings.m_minAmplitude / pcbIUScale.IU_PER_MM;
+    out["maxAmplitude"] = aSettings.m_maxAmplitude / pcbIUScale.IU_PER_MM;
+    out["spacing"] = aSettings.m_spacing / pcbIUScale.IU_PER_MM;
+    out["cornerStyle"] = aSettings.m_cornerStyle == PNS::MEANDER_STYLE_ROUND ? "round" : "chamfer";
+    out["cornerRadiusPercent"] = aSettings.m_cornerRadiusPercentage;
+    out["singleSided"] = aSettings.m_singleSided;
+    out["timeDomain"] = time;
+    out["overrideCustomRules"] = aSettings.m_overrideCustomRules;
+
+    if( aMode == PNS::PNS_MODE_TUNE_DIFF_PAIR_SKEW )
+    {
+        out["target"] = time ? ccTuningRange( aSettings.m_targetSkewDelay,
+                                              PNS::MEANDER_SETTINGS::SKEW_UNCONSTRAINED, true )
+                             : ccTuningRange( aSettings.m_targetSkew,
+                                              PNS::MEANDER_SETTINGS::SKEW_UNCONSTRAINED, false );
+    }
+    else
+    {
+        out["target"] = time ? ccTuningRange( aSettings.m_targetLengthDelay,
+                                              PNS::MEANDER_SETTINGS::DELAY_UNCONSTRAINED, true )
+                             : ccTuningRange( aSettings.m_targetLength,
+                                              PNS::MEANDER_SETTINGS::LENGTH_UNCONSTRAINED, false );
+    }
+
+    if( aRules.IsNull() )
+    {
+        out["fromRules"] = nullptr;
+    }
+    else
+    {
+        const bool rulesTime = aRules.GetOption( DRC_CONSTRAINT::OPTIONS::TIME_DOMAIN );
+        out["fromRules"] = ccTuningRange( aRules.GetValue(), std::numeric_limits<long long>::min(),
+                                          rulesTime );
+    }
+
+    return out;
+}
+
+
+/** A finite number in [aMin, aMax]. */
+static bool ccTuningNumber( const nlohmann::json& aValue, double aMin, double aMax )
+{
+    return aValue.is_number() && std::isfinite( aValue.get<double>() )
+           && aValue.get<double>() >= aMin && aValue.get<double>() <= aMax;
+}
+
+
+/** A target {min?, opt?, max?}, each a number in range or null. */
+static bool ccTuningTargetValid( const nlohmann::json& aTarget )
+{
+    if( !aTarget.is_object() )
+        return false;
+
+    for( auto it = aTarget.begin(); it != aTarget.end(); ++it )
+    {
+        if( it.key() != "min" && it.key() != "opt" && it.key() != "max" )
+            return false;
+
+        // At most 2,000 mm or ps, so the internal units fit KiCad's int ranges.
+        if( !it.value().is_null() && !ccTuningNumber( it.value(), 0.0, 2000.0 ) )
+            return false;
+    }
+
+    // min and max narrow an opt; neither stands without one.
+    const bool hasOpt = aTarget.contains( "opt" ) && !aTarget["opt"].is_null();
+
+    for( const char* key : { "min", "max" } )
+    {
+        if( aTarget.contains( key ) && !aTarget[key].is_null() && !hasOpt )
+            return false;
+    }
+
+    return true;
+}
+
+
+bool CcTuningSetValid( const nlohmann::json& aSet )
+{
+    if( !aSet.is_object() || aSet.empty() )
+        return false;
+
+    for( auto it = aSet.begin(); it != aSet.end(); ++it )
+    {
+        const std::string&    key = it.key();
+        const nlohmann::json& v = it.value();
+
+        if( key == "minAmplitude" || key == "maxAmplitude" || key == "spacing" )
+        {
+            if( !ccTuningNumber( v, 0.0, 1000.0 ) )
+                return false;
+        }
+        else if( key == "cornerRadiusPercent" )
+        {
+            if( !v.is_number_integer() || v.get<long long>() < 0 || v.get<long long>() > 100 )
+                return false;
+        }
+        else if( key == "cornerStyle" )
+        {
+            if( !v.is_string() || ( v != "chamfer" && v != "round" ) )
+                return false;
+        }
+        else if( key == "singleSided" || key == "timeDomain" || key == "overrideCustomRules" )
+        {
+            if( !v.is_boolean() )
+                return false;
+        }
+        else if( key == "target" )
+        {
+            if( !ccTuningTargetValid( v ) )
+                return false;
+        }
+        else
+        {
+            return false;   // mode and fromRules are read only; nothing else is a setting
+        }
+    }
+
+    return true;
+}
+
+
+/** aSet (valid) onto aSettings as the dialog's TransferDataFromWindow sets its fields. */
+static void ccTuningApplySet( PNS::MEANDER_SETTINGS& aSettings, PNS::ROUTER_MODE aMode,
+                              const nlohmann::json& aSet )
+{
+    auto mm = []( const nlohmann::json& v ) { return pcbIUScale.mmToIU( v.get<double>() ); };
+
+    if( aSet.contains( "overrideCustomRules" ) )
+        aSettings.m_overrideCustomRules = aSet["overrideCustomRules"].get<bool>();
+
+    if( aSet.contains( "timeDomain" ) )
+        aSettings.m_isTimeDomain = aSet["timeDomain"].get<bool>();
+
+    if( aSet.contains( "minAmplitude" ) )
+        aSettings.m_minAmplitude = mm( aSet["minAmplitude"] );
+
+    if( aSet.contains( "maxAmplitude" ) )
+        aSettings.m_maxAmplitude = mm( aSet["maxAmplitude"] );
+
+    if( aSet.contains( "spacing" ) )
+        aSettings.m_spacing = mm( aSet["spacing"] );
+
+    if( aSet.contains( "cornerStyle" ) )
+    {
+        aSettings.m_cornerStyle = aSet["cornerStyle"] == "round" ? PNS::MEANDER_STYLE_ROUND
+                                                                 : PNS::MEANDER_STYLE_CHAMFER;
+    }
+
+    if( aSet.contains( "cornerRadiusPercent" ) )
+        aSettings.m_cornerRadiusPercentage = aSet["cornerRadiusPercent"].get<int>();
+
+    if( aSet.contains( "singleSided" ) )
+        aSettings.m_singleSided = aSet["singleSided"].get<bool>();
+
+    if( !aSet.contains( "target" ) )
+        return;
+
+    // The dialog's two fields: the one of the domain in effect takes the target, the other is
+    // left empty (unconstrained), as TransferDataFromWindow sets them.
+    const nlohmann::json& target = aSet["target"];
+    const bool            time = aSettings.m_isTimeDomain;
+    const double          scale = time ? pcbIUScale.IU_PER_PS : pcbIUScale.IU_PER_MM;
+    const bool            hasOpt = target.contains( "opt" ) && !target["opt"].is_null();
+    MINOPTMAX<int>        range;
+
+    if( hasOpt )
+    {
+        range.SetOpt( KiROUND( target["opt"].get<double>() * scale ) );
+
+        if( target.contains( "min" ) && !target["min"].is_null() )
+            range.SetMin( KiROUND( target["min"].get<double>() * scale ) );
+
+        if( target.contains( "max" ) && !target["max"].is_null() )
+            range.SetMax( KiROUND( target["max"].get<double>() * scale ) );
+    }
+
+    if( aMode == PNS::PNS_MODE_TUNE_DIFF_PAIR_SKEW )
+    {
+        aSettings.SetTargetSkew( PNS::MEANDER_SETTINGS::SKEW_UNCONSTRAINED );
+        aSettings.SetTargetSkewDelay( PNS::MEANDER_SETTINGS::SKEW_UNCONSTRAINED );
+
+        if( hasOpt && time )
+            aSettings.SetTargetSkewDelay( range );
+        else if( hasOpt )
+            aSettings.SetTargetSkew( range );
+    }
+    else
+    {
+        aSettings.SetTargetLength( PNS::MEANDER_SETTINGS::LENGTH_UNCONSTRAINED );
+        aSettings.SetTargetLengthDelay( PNS::MEANDER_SETTINGS::DELAY_UNCONSTRAINED );
+
+        if( hasOpt && time )
+            aSettings.SetTargetLengthDelay( range );
+        else if( hasOpt )
+            aSettings.SetTargetLength( range );
+    }
+}
+
+
+/** The rules the live tool's dialog would be given (the loop's own EvalRules). */
+static DRC_CONSTRAINT ccTuningLiveRules( const CC_TUNING_LIVE& aLive )
+{
+    DRC_CONSTRAINT constraint;
+
+    if( aLive.pattern && *aLive.pattern && aLive.drc && !( *aLive.pattern )->GetItems().empty() )
+    {
+        BOARD_ITEM* startItem = *( *aLive.pattern )->GetBoardItems().begin();
+        constraint = aLive.drc->EvalRules( LENGTH_CONSTRAINT, startItem, nullptr,
+                                           startItem->GetLayer() );
+    }
+
+    return constraint;
+}
+
+
+std::string CcTuningLiveGet()
+{
+    if( !s_ccTuningLive )
+        return "";
+
+    return ccTuningSettingsJson( *s_ccTuningLive->settings, s_ccTuningLive->mode,
+                                 ccTuningLiveRules( *s_ccTuningLive ) )
+            .dump( -1, ' ', false, nlohmann::json::error_handler_t::replace );
+}
+
+
+bool CcTuningLiveSet( const nlohmann::json& aSet,
+                      std::function<void( const nlohmann::json& )> aDone )
+{
+    if( !s_ccTuningLive || !CcTuningSetValid( aSet ) )
+        return false;
+
+    // The tool's own loop applies it, on its own coroutine, in place of its dialog (the
+    // properties branch of DRAWING_TOOL::PlaceTuningPattern).
+    s_ccTuningPendingSet = aSet;
+    s_ccTuningDone = std::move( aDone );
+    s_ccTuningLive->toolMgr->PostAction( PCB_ACTIONS::lengthTunerSettings );
+    return true;
+}
+
+
+/** The settings a placed pattern's dialog starts from (ShowPropertiesDialog's own reading). */
+static PNS::MEANDER_SETTINGS ccPatternDialogSettings( PCB_TUNING_PATTERN* aPattern,
+                                                      DRC_CONSTRAINT& aConstraint )
+{
+    PNS::MEANDER_SETTINGS settings = aPattern->GetSettings();
+
+    if( aPattern->GetItems().empty() )
+        return settings;
+
+    BOARD_ITEM*                  startItem = *aPattern->GetBoardItems().begin();
+    std::shared_ptr<DRC_ENGINE>& drcEngine = aPattern->GetBoard()->GetDesignSettings().m_DRCEngine;
+    const bool                   skew = aPattern->GetTuningMode() == DIFF_PAIR_SKEW;
+
+    aConstraint = drcEngine->EvalRules( skew ? SKEW_CONSTRAINT : LENGTH_CONSTRAINT, startItem,
+                                        nullptr, aPattern->GetLayer() );
+
+    if( !aConstraint.IsNull() && !settings.m_overrideCustomRules )
+    {
+        if( aConstraint.GetOption( DRC_CONSTRAINT::OPTIONS::TIME_DOMAIN ) )
+        {
+            settings.SetTargetLengthDelay( aConstraint.GetValue() );
+            settings.SetTargetLength( MINOPTMAX<int>() );
+            settings.m_isTimeDomain = true;
+        }
+        else
+        {
+            settings.SetTargetLengthDelay( MINOPTMAX<int>() );
+            settings.SetTargetLength( aConstraint.GetValue() );
+            settings.m_isTimeDomain = false;
+        }
+    }
+
+    return settings;
+}
+
+
+nlohmann::json CcTuningPatternRecord( BOARD_ITEM* aItem )
+{
+    PCB_TUNING_PATTERN* pattern = dynamic_cast<PCB_TUNING_PATTERN*>( aItem );
+
+    if( !pattern )
+        return nlohmann::json();
+
+    DRC_CONSTRAINT        constraint;
+    PNS::MEANDER_SETTINGS settings = ccPatternDialogSettings( pattern, constraint );
+    nlohmann::json        out = ccTuningSettingsJson( settings, pattern->GetPNSMode(), constraint );
+
+    out["kind"] = "tuning";
+    out["uuid"] = pattern->m_Uuid.AsString().ToStdString( wxConvUTF8 );
+    out["layer"] = LSET::Name( pattern->GetLayer() ).ToStdString( wxConvUTF8 );
+    return out;
+}
+
+
+bool CcTuningPatternApply( PCB_BASE_EDIT_FRAME* aFrame, BOARD_ITEM* aItem,
+                           const nlohmann::json& aSet, BOARD_COMMIT& aCommit )
+{
+    PCB_TUNING_PATTERN* pattern = dynamic_cast<PCB_TUNING_PATTERN*>( aItem );
+
+    if( !aFrame || !pattern || !CcTuningSetValid( aSet ) )
+        return false;
+
+    DRC_CONSTRAINT        constraint;
+    PNS::MEANDER_SETTINGS settings = ccPatternDialogSettings( pattern, constraint );
+
+    ccTuningApplySet( settings, pattern->GetPNSMode(), aSet );
+
+    // ShowPropertiesDialog's OK, into the caller's commit.
+    aCommit.Modify( pattern );
+    pattern->GetSettings() = settings;
+
+    GENERATOR_TOOL* generatorTool = aFrame->GetToolManager()->GetTool<GENERATOR_TOOL>();
+    pattern->EditStart( generatorTool, pattern->GetBoard(), &aCommit );
+    pattern->Update( generatorTool, pattern->GetBoard(), &aCommit );
+    pattern->EditFinish( generatorTool, pattern->GetBoard(), &aCommit );
+    return true;
+}
+#endif
+
+
 void PCB_TUNING_PATTERN::ShowPropertiesDialog( PCB_BASE_EDIT_FRAME* aEditFrame )
 {
+#ifdef __EMSCRIPTEN__
+    // The host's Tuning form edits this pattern (window.kicadHostBoardItem): held, no dialog.
+    if( CcAskHostBoardItem( "tuning", &m_Uuid, false ) )
+        return;
+#endif
+
     PNS::MEANDER_SETTINGS settings = m_settings;
     DRC_CONSTRAINT        constraint;
 
@@ -2291,6 +2691,29 @@ int DRAWING_TOOL::PlaceTuningPattern( const TOOL_EVENT& aEvent )
                 }
             };
 
+#ifdef __EMSCRIPTEN__
+    // The host's Tuning form reads and sets this loop's settings while it runs (board_item_host.h).
+    CC_TUNING_LIVE ccLive{ &meanderSettings, routerMode, &m_tuningPattern, drcEngine.get(),
+                           m_toolMgr };
+
+    struct CC_TUNING_LIVE_SCOPE
+    {
+        explicit CC_TUNING_LIVE_SCOPE( CC_TUNING_LIVE* aLive )
+        {
+            s_ccTuningLive = aLive;
+            s_ccTuningPendingSet.reset();
+            s_ccTuningDone = nullptr;
+        }
+
+        ~CC_TUNING_LIVE_SCOPE()
+        {
+            s_ccTuningLive = nullptr;
+            s_ccTuningPendingSet.reset();
+            s_ccTuningDone = nullptr;
+        }
+    } ccLiveScope( &ccLive );
+#endif
+
     while( TOOL_EVENT* evt = Wait() )
     {
         VECTOR2D cursorPos = controls->GetMousePosition();
@@ -2488,6 +2911,44 @@ int DRAWING_TOOL::PlaceTuningPattern( const TOOL_EVENT& aEvent )
                 }
             }
 
+#ifdef __EMSCRIPTEN__
+            if( s_ccTuningPendingSet )
+            {
+                // The host's Tuning form set these (CcTuningLiveSet): applied as the dialog's OK.
+                const nlohmann::json set = *s_ccTuningPendingSet;
+                auto                 done = std::move( s_ccTuningDone );
+
+                s_ccTuningPendingSet.reset();
+                s_ccTuningDone = nullptr;
+
+                ccTuningApplySet( meanderSettings, routerMode, set );
+
+                if( m_tuningPattern )
+                    applyCommonSettings( m_tuningPattern );
+
+                updateTuningPattern();
+
+                if( done )
+                {
+                    done( ccTuningSettingsJson( meanderSettings, routerMode,
+                                                ccTuningLiveRules( ccLive ) ) );
+                }
+            }
+            else if( !CcAskHostBoardItem( "tuning", nullptr, false ) )
+            {
+                // Not held by the host's Tuning form: KiCad's dialog, as before.
+                DIALOG_TUNING_PATTERN_PROPERTIES dlg( m_frame, meanderSettings, routerMode,
+                                                      constraint );
+
+                if( dlg.ShowModal() == wxID_OK )
+                {
+                    if( m_tuningPattern )
+                        applyCommonSettings( m_tuningPattern );
+
+                    updateTuningPattern();
+                }
+            }
+#else
             DIALOG_TUNING_PATTERN_PROPERTIES dlg( m_frame, meanderSettings, routerMode, constraint );
 
             if( dlg.ShowModal() == wxID_OK )
@@ -2497,6 +2958,7 @@ int DRAWING_TOOL::PlaceTuningPattern( const TOOL_EVENT& aEvent )
 
                 updateTuningPattern();
             }
+#endif
         }
         // TODO: It'd be nice to be able to say "don't allow any non-trivial editing actions",
         // but we don't at present have that, so we just knock out some of the egregious ones.
