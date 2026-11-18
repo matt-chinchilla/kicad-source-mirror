@@ -4,6 +4,10 @@
  * Copyright (C) 2022 Mark Roszko <mark.roszko@gmail.com>
  * Copyright The KiCad Developers, see AUTHORS.txt for contributors.
  *
+ * Modified by Circuit Center Inc on 2026-11-18: the render job (pcb_render) is compiled into the
+ * WebAssembly build: registered with no settings dialog, run by a copy of JobExportRender that
+ * yields to the browser between the raytracer's passes and reports each pass's percent.
+ *
  * This program is free software: you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
  * Free Software Foundation, either version 3 of the License, or (at your
@@ -94,6 +98,13 @@
 #ifndef __EMSCRIPTEN__
 #include <3d_rendering/raytracing/render_3d_raytrace_ram.h>
 #include <3d_rendering/track_ball.h>
+#else
+#include <emscripten.h>
+#include <emscripten/threading.h>
+#include <algorithm>
+#include <functional>
+#include <3d_rendering/raytracing/render_3d_raytrace_ram.h>
+#include <3d_rendering/track_ball.h>
 #endif
 #include <project_pcb.h>
 #include <pcb_io/kicad_sexpr/pcb_io_kicad_sexpr.h>
@@ -128,6 +139,15 @@
 #endif
 
 
+#ifdef __EMSCRIPTEN__
+// The render job in the WebAssembly build (engine run 15): JobExportRender's body, its board and
+// output path taken through the handler's own private helpers, which the registering lambda passes.
+static int ccJobExportRender( JOB* aJob, REPORTER* aReporter,
+                              const std::function<BOARD*( const wxString& )>& aGetBoard,
+                              const std::function<wxString( JOB*, BOARD* )>& aResolveOutputPath );
+#endif
+
+
 PCBNEW_JOBS_HANDLER::PCBNEW_JOBS_HANDLER( KIWAY* aKiway ) :
         JOB_DISPATCHER( aKiway ),
         m_cliBoard( nullptr ),
@@ -157,6 +177,27 @@ PCBNEW_JOBS_HANDLER::PCBNEW_JOBS_HANDLER( KIWAY* aKiway ) :
 
                   DIALOG_RENDER_JOB dlg( aParent, renderJob );
                   return dlg.ShowModal() == wxID_OK;
+              } );
+#else
+    // The render job's settings come only from its job JSON (the island's project.export), so its
+    // settings dialog never opens: the dialog answer is false.
+    Register( "render",
+              [this]( JOB* aJob ) -> int
+              {
+                  return ccJobExportRender(
+                          aJob, m_reporter,
+                          [this]( const wxString& aPath ) -> BOARD*
+                          {
+                              return getBoard( aPath );
+                          },
+                          [this]( JOB* aRenderJob, BOARD* aBoard ) -> wxString
+                          {
+                              return resolveJobOutputPath( aRenderJob, aBoard );
+                          } );
+              },
+              []( JOB* job, wxWindow* aParent ) -> bool
+              {
+                  return false;
               } );
 #endif
     Register( "upgrade", std::bind( &PCBNEW_JOBS_HANDLER::JobUpgrade, this, std::placeholders::_1 ),
@@ -932,6 +973,375 @@ int PCBNEW_JOBS_HANDLER::JobExportRender( JOB* aJob )
     else
     {
         m_reporter->Report( _( "Error creating 3D render image" ) + wxS( "\n" ), RPT_SEVERITY_ERROR );
+        return CLI::EXIT_CODES::ERR_UNKNOWN;
+    }
+}
+#else
+namespace
+{
+// Token waits live in the wx wasm port (evtloop.cpp).
+extern "C" int wxWasmBeginWait( const char* aKind );
+extern "C" int wxWasmYieldUntil( int aToken );
+
+// The wait is resolved from a browser task, so the page paints and takes input before the next
+// pass (the scheduler's wait, as the 3D service's and the model fetch's token waits use).
+EM_JS( void, cc_render_yield_start, ( int aToken ), {
+    setTimeout( () => globalThis.__wxScheduler.resolveWait( aToken, 0 ), 0 );
+} );
+
+
+/// One turn of the browser's event loop between two raytracer passes (main thread only).
+void ccRenderYield()
+{
+    if( !emscripten_is_main_runtime_thread() )
+        return;
+
+    const int token = wxWasmBeginWait( "render" );
+
+    // Token 0: the scheduler refused the wait (a dead or terminal instance); go on unyielded.
+    if( token <= 0 )
+        return;
+
+    cc_render_yield_start( token );
+    wxWasmYieldUntil( token );
+}
+
+
+/// The raytracer's status reporter: keeps the percent of its tracing lines ("Rendering: %.0f %%",
+/// RENDER_3D_RAYTRACE_BASE::renderTracing) and reports nothing itself.
+class CC_RENDER_PASSES : public REPORTER
+{
+public:
+    using REPORTER::Report;
+
+    REPORTER& Report( const wxString& aText, SEVERITY aSeverity = RPT_SEVERITY_UNDEFINED ) override
+    {
+        if( !aText.Contains( wxS( "%" ) ) )
+            return *this;
+
+        wxString digits;
+
+        for( wxUniChar ch : aText )
+        {
+            if( ch >= '0' && ch <= '9' )
+                digits += ch;
+            else if( !digits.IsEmpty() )
+                break;
+        }
+
+        long value = 0;
+
+        if( !digits.IsEmpty() && digits.ToLong( &value ) )
+            m_percent = std::clamp( value, 0L, 100L );
+
+        return *this;
+    }
+
+    bool HasMessage() const override { return false; }
+
+    /// "Rendering <n> percent" on aReporter when the percent moved since the last line.
+    void ReportPercent( REPORTER& aReporter )
+    {
+        if( m_percent < 0 || m_percent == m_reported )
+            return;
+
+        m_reported = m_percent;
+        aReporter.Report( wxString::Format( wxS( "Rendering %ld percent" ), m_reported ),
+                          RPT_SEVERITY_INFO );
+    }
+
+private:
+    long m_percent = -1;
+    long m_reported = -1;
+};
+} // namespace
+
+
+static int ccJobExportRender( JOB* aJob, REPORTER* aReporter,
+                              const std::function<BOARD*( const wxString& )>& aGetBoard,
+                              const std::function<wxString( JOB*, BOARD* )>& aResolveOutputPath )
+{
+    JOB_PCB_RENDER* aRenderJob = dynamic_cast<JOB_PCB_RENDER*>( aJob );
+
+    if( aRenderJob == nullptr )
+        return CLI::EXIT_CODES::ERR_UNKNOWN;
+
+    // Reject width and height being invalid
+    // Final bit of sanity because this can blow things up
+    if( aRenderJob->m_width <= 0 || aRenderJob->m_height <= 0 )
+    {
+        aReporter->Report( _( "Invalid image dimensions" ), RPT_SEVERITY_ERROR );
+        return CLI::EXIT_CODES::ERR_ARGS;
+    }
+
+    BOARD* brd = aGetBoard( aRenderJob->m_filename );
+
+    if( !brd )
+        return CLI::EXIT_CODES::ERR_INVALID_INPUT_FILE;
+
+    if( !aRenderJob->m_variant.IsEmpty() )
+        brd->SetCurrentVariant( aRenderJob->m_variant );
+
+    if( aRenderJob->GetConfiguredOutputPath().IsEmpty() )
+    {
+        wxFileName fn = brd->GetFileName();
+
+        switch( aRenderJob->m_format )
+        {
+        case JOB_PCB_RENDER::FORMAT::JPEG: fn.SetExt( FILEEXT::JpegFileExtension ); break;
+        case JOB_PCB_RENDER::FORMAT::PNG:  fn.SetExt( FILEEXT::PngFileExtension );  break;
+        default:
+            aReporter->Report( _( "Unknown export format" ), RPT_SEVERITY_ERROR );
+            return CLI::EXIT_CODES::ERR_UNKNOWN; // shouldnt have gotten here
+        }
+
+        // set the name to board name + "side", its lazy but its hard to generate anything truely unique
+        // incase someone is doing this in a jobset with multiple jobs, they should be setting the output themselves
+        // or we do a hash based on all the options
+        fn.SetName( wxString::Format( "%s-%d", fn.GetName(), static_cast<int>( aRenderJob->m_side ) ) );
+
+        aRenderJob->SetWorkingOutputPath( fn.GetFullName() );
+    }
+
+    wxString outPath = aResolveOutputPath( aJob, brd );
+
+    if( !PATHS::EnsurePathExists( outPath, true ) )
+    {
+        aReporter->Report( _( "Failed to create output directory\n" ), RPT_SEVERITY_ERROR );
+        return CLI::EXIT_CODES::ERR_INVALID_OUTPUT_CONFLICT;
+    }
+
+    BOARD_ADAPTER boardAdapter;
+
+    boardAdapter.SetBoard( brd );
+    boardAdapter.m_IsBoardView = false;
+
+    EDA_3D_VIEWER_SETTINGS cfg;
+
+    if( EDA_3D_VIEWER_SETTINGS* userCfg = GetAppSettings<EDA_3D_VIEWER_SETTINGS>( "3d_viewer" ) )
+    {
+        cfg.m_Render = userCfg->m_Render;
+        cfg.m_Camera = userCfg->m_Camera;
+        cfg.m_LayerPresets = userCfg->m_LayerPresets;
+    }
+
+    if( aRenderJob->m_appearancePreset.empty() )
+    {
+        // Force display 3D models
+        cfg.m_Render.show_footprints_not_in_posfile = true;
+        cfg.m_Render.show_footprints_dnp = true;
+        cfg.m_Render.show_footprints_insert = true;
+        cfg.m_Render.show_footprints_normal = true;
+        cfg.m_Render.show_footprints_virtual = true;
+    }
+
+    if( aRenderJob->m_quality == JOB_PCB_RENDER::QUALITY::BASIC )
+    {
+        // Silkscreen is pixelated without antialiasing
+        cfg.m_Render.raytrace_anti_aliasing = true;
+
+        cfg.m_Render.raytrace_backfloor = aRenderJob->m_floor;
+        cfg.m_Render.raytrace_post_processing = aRenderJob->m_floor;
+
+        cfg.m_Render.raytrace_procedural_textures = false;
+        cfg.m_Render.raytrace_reflections = false;
+        cfg.m_Render.raytrace_shadows = aRenderJob->m_floor;
+
+        // Better colors
+        cfg.m_Render.differentiate_plated_copper = true;
+
+        // Tracks below soldermask are not visible without refractions
+        cfg.m_Render.raytrace_refractions = true;
+        cfg.m_Render.raytrace_recursivelevel_refractions = 1;
+    }
+    else if( aRenderJob->m_quality == JOB_PCB_RENDER::QUALITY::HIGH )
+    {
+        cfg.m_Render.raytrace_anti_aliasing = true;
+        cfg.m_Render.raytrace_backfloor = true;
+        cfg.m_Render.raytrace_post_processing = true;
+        cfg.m_Render.raytrace_procedural_textures = true;
+        cfg.m_Render.raytrace_reflections = true;
+        cfg.m_Render.raytrace_shadows = true;
+        cfg.m_Render.raytrace_refractions = true;
+        cfg.m_Render.differentiate_plated_copper = true;
+    }
+    else if( aRenderJob->m_quality == JOB_PCB_RENDER::QUALITY::JOB_SETTINGS )
+    {
+        cfg.m_Render.raytrace_anti_aliasing = aRenderJob->m_antiAlias;
+        cfg.m_Render.raytrace_backfloor = aRenderJob->m_floor;
+        cfg.m_Render.raytrace_post_processing = aRenderJob->m_postProcess;
+        cfg.m_Render.raytrace_procedural_textures = aRenderJob->m_proceduralTextures;
+    }
+
+    cfg.m_Render.raytrace_lightColorTop = COLOR4D( aRenderJob->m_lightTopIntensity.x,
+                                                   aRenderJob->m_lightTopIntensity.y,
+                                                   aRenderJob->m_lightTopIntensity.z, 1.0 );
+
+    cfg.m_Render.raytrace_lightColorBottom = COLOR4D( aRenderJob->m_lightBottomIntensity.x,
+                                                      aRenderJob->m_lightBottomIntensity.y,
+                                                      aRenderJob->m_lightBottomIntensity.z, 1.0 );
+
+    cfg.m_Render.raytrace_lightColorCamera = COLOR4D( aRenderJob->m_lightCameraIntensity.x,
+                                                      aRenderJob->m_lightCameraIntensity.y,
+                                                      aRenderJob->m_lightCameraIntensity.z, 1.0 );
+
+    COLOR4D lightColor( aRenderJob->m_lightSideIntensity.x,
+                        aRenderJob->m_lightSideIntensity.y,
+                        aRenderJob->m_lightSideIntensity.z, 1.0 );
+
+    cfg.m_Render.raytrace_lightColor = {
+        lightColor, lightColor, lightColor, lightColor,
+        lightColor, lightColor, lightColor, lightColor,
+    };
+
+    int sideElevation = aRenderJob->m_lightSideElevation;
+
+    cfg.m_Render.raytrace_lightElevation = {
+        sideElevation,  sideElevation,  sideElevation,  sideElevation,
+        -sideElevation, -sideElevation, -sideElevation, -sideElevation,
+    };
+
+    cfg.m_Render.raytrace_lightAzimuth = {
+        45, 135, 225, 315, 45, 135, 225, 315,
+    };
+
+    cfg.m_CurrentPreset = aRenderJob->m_appearancePreset;
+    cfg.m_UseStackupColors = aRenderJob->m_useBoardStackupColors;
+    boardAdapter.m_Cfg = &cfg;
+
+    // Apply the preset's layer visibility and colors to the render settings
+    if( !aRenderJob->m_appearancePreset.empty() )
+    {
+        wxString presetName = wxString::FromUTF8( aRenderJob->m_appearancePreset );
+
+        if( presetName == FOLLOW_PCB || presetName == FOLLOW_PLOT_SETTINGS )
+        {
+            boardAdapter.SetVisibleLayers( boardAdapter.GetVisibleLayers() );
+        }
+        else if( LAYER_PRESET_3D* preset = cfg.FindPreset( presetName ) )
+        {
+            boardAdapter.SetVisibleLayers( preset->layers );
+            boardAdapter.SetLayerColors( preset->colors );
+
+            if( preset->name.Lower() == _( "legacy colors" ) )
+                cfg.m_UseStackupColors = false;
+        }
+    }
+
+    if( aRenderJob->m_bgStyle == JOB_PCB_RENDER::BG_STYLE::TRANSPARENT
+        || ( aRenderJob->m_bgStyle == JOB_PCB_RENDER::BG_STYLE::DEFAULT
+             && aRenderJob->m_format == JOB_PCB_RENDER::FORMAT::PNG ) )
+    {
+        boardAdapter.m_ColorOverrides[LAYER_3D_BACKGROUND_TOP] = COLOR4D( 1.0, 1.0, 1.0, 0.0 );
+        boardAdapter.m_ColorOverrides[LAYER_3D_BACKGROUND_BOTTOM] = COLOR4D( 1.0, 1.0, 1.0, 0.0 );
+    }
+
+    boardAdapter.Set3dCacheManager( PROJECT_PCB::Get3DCacheManager( brd->GetProject() ) );
+
+    static std::map<JOB_PCB_RENDER::SIDE, VIEW3D_TYPE> s_viewCmdMap = {
+        { JOB_PCB_RENDER::SIDE::TOP, VIEW3D_TYPE::VIEW3D_TOP },
+        { JOB_PCB_RENDER::SIDE::BOTTOM, VIEW3D_TYPE::VIEW3D_BOTTOM },
+        { JOB_PCB_RENDER::SIDE::LEFT, VIEW3D_TYPE::VIEW3D_LEFT },
+        { JOB_PCB_RENDER::SIDE::RIGHT, VIEW3D_TYPE::VIEW3D_RIGHT },
+        { JOB_PCB_RENDER::SIDE::FRONT, VIEW3D_TYPE::VIEW3D_FRONT },
+        { JOB_PCB_RENDER::SIDE::BACK, VIEW3D_TYPE::VIEW3D_BACK },
+    };
+
+    PROJECTION_TYPE projection =  aRenderJob->m_perspective ? PROJECTION_TYPE::PERSPECTIVE
+                                                            : PROJECTION_TYPE::ORTHO;
+
+    wxSize     windowSize( aRenderJob->m_width, aRenderJob->m_height );
+    TRACK_BALL camera( 2 * RANGE_SCALE_3D );
+
+    camera.SetProjection( projection );
+    camera.SetCurWindowSize( windowSize );
+
+    RENDER_3D_RAYTRACE_RAM raytrace( boardAdapter, camera );
+    raytrace.SetCurWindowSize( windowSize );
+
+    // The raytracer's status lines are read for each pass's percent; its warnings (a model it
+    // could not load) reach the job's reporter as KiCad's own.
+    CC_RENDER_PASSES passes;
+
+    for( bool first = true; raytrace.Redraw( false, &passes, aReporter ); first = false )
+    {
+        if( first )
+        {
+            const float cmTo3D = boardAdapter.BiuTo3dUnits() * pcbIUScale.mmToIU( 10.0 );
+
+            // First redraw resets lookat point to the board center, so set up the camera here
+            camera.ViewCommand_T1( s_viewCmdMap[aRenderJob->m_side] );
+
+            camera.SetLookAtPos_T1( camera.GetLookAtPos_T1() + SFVEC3F( aRenderJob->m_pivot.x,
+                                                                        aRenderJob->m_pivot.y,
+                                                                        aRenderJob->m_pivot.z ) * cmTo3D );
+
+            camera.Pan_T1( SFVEC3F( aRenderJob->m_pan.x, aRenderJob->m_pan.y, aRenderJob->m_pan.z ) );
+
+            camera.Zoom_T1( aRenderJob->m_zoom );
+
+            camera.RotateX_T1( DEG2RAD( aRenderJob->m_rotation.x ) );
+            camera.RotateY_T1( DEG2RAD( aRenderJob->m_rotation.y ) );
+            camera.RotateZ_T1( DEG2RAD( aRenderJob->m_rotation.z ) );
+
+            camera.Interpolate( 1.0f );
+            camera.SetT0_and_T1_current_T();
+            camera.ParametersChanged();
+        }
+
+        // One line per pass that moved the percent, then a turn of the browser's event loop.
+        passes.ReportPercent( *aReporter );
+        ccRenderYield();
+    }
+
+    uint8_t* rgbaBuffer = raytrace.GetBuffer();
+    wxSize   realSize = raytrace.GetRealBufferSize();
+    bool     success = !!rgbaBuffer;
+
+    if( rgbaBuffer )
+    {
+        const unsigned int wxh = realSize.x * realSize.y;
+
+        unsigned char* rgbBuffer = (unsigned char*) malloc( wxh * 3 );
+        unsigned char* alphaBuffer = (unsigned char*) malloc( wxh );
+
+        unsigned char* rgbaPtr = rgbaBuffer;
+        unsigned char* rgbPtr = rgbBuffer;
+        unsigned char* alphaPtr = alphaBuffer;
+
+        for( int y = 0; y < realSize.y; y++ )
+        {
+            for( int x = 0; x < realSize.x; x++ )
+            {
+                rgbPtr[0] = rgbaPtr[0];
+                rgbPtr[1] = rgbaPtr[1];
+                rgbPtr[2] = rgbaPtr[2];
+                alphaPtr[0] = rgbaPtr[3];
+
+                rgbaPtr += 4;
+                rgbPtr += 3;
+                alphaPtr += 1;
+            }
+        }
+
+        wxImage image( realSize );
+        image.SetData( rgbBuffer );
+        image.SetAlpha( alphaBuffer );
+        image = image.Mirror( false );
+
+        image.SetOption( wxIMAGE_OPTION_QUALITY, 90 );
+        image.SaveFile( outPath, aRenderJob->m_format == JOB_PCB_RENDER::FORMAT::PNG ? wxBITMAP_TYPE_PNG
+                                                                                     : wxBITMAP_TYPE_JPEG );
+    }
+
+    if( success )
+    {
+        aReporter->Report( _( "Successfully created 3D render image" ) + wxS( "\n" ), RPT_SEVERITY_INFO );
+        return CLI::EXIT_CODES::OK;
+    }
+    else
+    {
+        aReporter->Report( _( "Error creating 3D render image" ) + wxS( "\n" ), RPT_SEVERITY_ERROR );
         return CLI::EXIT_CODES::ERR_UNKNOWN;
     }
 }
