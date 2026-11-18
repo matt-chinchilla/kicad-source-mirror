@@ -3,6 +3,11 @@
  *
  * Copyright The KiCad Developers, see AUTHORS.txt for contributors.
  *
+ * Modified by Circuit Center Inc on 2026-11-18: in the WebAssembly editor the layout writing
+ * bodies of SaveBoardAsDesignBlock, saveSelectionToDesignBlock and the linked group's save are
+ * also free functions that take a folder, with no dialog and no library write (engine run 15,
+ * K-B3).
+ *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
  * as published by the Free Software Foundation; either version 2
@@ -621,3 +626,196 @@ bool PCB_EDIT_FRAME::UpdateDesignBlockFromSelection( const LIB_ID& aLibId )
 
     return true;
 }
+
+
+#ifdef __EMSCRIPTEN__
+
+#include <cc_pcb_design_block_write.h>
+#include <wx/filefn.h>
+
+
+static bool ccWriteDesignBlockBoard( BOARD* aBoard, const wxString& aFolder, const wxString& aName,
+                                     std::vector<wxString>& aLines )
+{
+    // Ensure the "C" locale is temporary set, before saving any file
+    LOCALE_IO dummy;
+
+    wxFileName pcbFileName( aFolder, aName, FILEEXT::KiCadPcbFileExtension );
+
+    if( !wxFileName::DirExists( aFolder )
+            && !wxFileName::Mkdir( aFolder, wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL ) )
+    {
+        aLines.push_back( wxString::Format( _( "Insufficient permissions to write file '%s'." ),
+                                            pcbFileName.GetFullPath() ) );
+        return false;
+    }
+
+    // The writer of PCB_EDIT_FRAME::saveBoardAsFile and SavePcbCopy
+    try
+    {
+        IO_RELEASER<PCB_IO> pi( PCB_IO_MGR::FindPlugin( PCB_IO_MGR::KICAD_SEXP ) );
+
+        pi->SaveBoard( pcbFileName.GetFullPath(), aBoard, nullptr );
+    }
+    catch( const IO_ERROR& ioe )
+    {
+        aLines.push_back( wxString::Format( _( "Error saving board file '%s'.\n%s" ),
+                                            pcbFileName.GetFullPath(), ioe.What() ) );
+        return false;
+    }
+
+    return true;
+}
+
+
+bool CcWriteBoardDesignBlock( PCB_EDIT_FRAME* aFrame, const wxString& aFolder,
+                              const wxString& aName, std::vector<wxString>& aLines )
+{
+    if( !aFrame || !aFrame->GetBoard() )
+        return false;
+
+    // SavePcbCopy's preparation of the board it writes
+    aFrame->GetBoard()->SynchronizeNetsAndNetClasses( false );
+
+    return ccWriteDesignBlockBoard( aFrame->GetBoard(), aFolder, aName, aLines );
+}
+
+
+bool CcWritePcbSelectionDesignBlock( PCB_EDIT_FRAME* aFrame, bool aLinkedGroupOnly,
+                                     const wxString& aFolder, const wxString& aName,
+                                     std::vector<wxString>& aLines )
+{
+    if( !aFrame || !aFrame->GetBoard() )
+        return false;
+
+    // Get all selected items
+    PCB_SELECTION selection =
+            aFrame->GetToolManager()->GetTool<PCB_SELECTION_TOOL>()->GetSelection();
+
+    if( selection.Empty() )
+    {
+        aLines.push_back( _( "Please select some items to save as a design block." ) );
+        return false;
+    }
+
+    // Need to have a group selected and it needs to have a linked design block
+    if( aLinkedGroupOnly
+            && ( selection.Size() != 1 || selection[0]->Type() != PCB_GROUP_T
+                 || !static_cast<PCB_GROUP*>( selection[0] )->HasDesignBlockLink() ) )
+    {
+        aLines.push_back( wxS( "Select one group linked to a design block." ) );
+        return false;
+    }
+
+    // If we have a single group, we want to strip the group and select the children
+    if( selection.Size() == 1 )
+    {
+        EDA_ITEM* item = selection.Front();
+
+        if( item->Type() == PCB_GROUP_T || ( aLinkedGroupOnly && item->Type() == PCB_GENERATOR_T ) )
+        {
+            PCB_GROUP* group = static_cast<PCB_GROUP*>( item );
+
+            selection.Remove( item );
+
+            // Don't recurse; if we have a group of groups the user probably intends the inner groups to be saved
+            group->RunOnChildren( [&]( EDA_ITEM* aItem ) { selection.Add( aItem ); }, RECURSE_MODE::NO_RECURSE );
+        }
+    }
+
+    BOARD* board = aFrame->GetBoard();
+
+    // Create a temporary board (as saveSelectionToDesignBlock: it shares the project's settings
+    // by reference, so it is never deleted, as KiCad never deletes its own)
+    BOARD* tempBoard = new BOARD();
+    tempBoard->SetDesignSettings( board->GetDesignSettings() );
+    tempBoard->SetProject( &aFrame->Prj(), true );
+    tempBoard->SynchronizeProperties();
+
+    // For copying net info of selected items into the new board
+    auto addNetIfNeeded =
+            [&]( EDA_ITEM* aItem )
+            {
+                BOARD_CONNECTED_ITEM* cItem = dynamic_cast<BOARD_CONNECTED_ITEM*>( aItem );
+
+                if( cItem )
+                {
+                    NETINFO_ITEM* netinfo = cItem->GetNet();
+
+                    if( netinfo )
+                    {
+                        NETINFO_ITEM* existingInfo = tempBoard->FindNet( netinfo->GetNetname() );
+
+                        // If the net has already been added to the new board, update our info to match
+                        if( existingInfo )
+                            cItem->SetNet( existingInfo );
+                        else
+                        {
+                            NETINFO_ITEM* newNet = new NETINFO_ITEM( tempBoard, netinfo->GetNetname() );
+                            tempBoard->Add( newNet );
+                            cItem->SetNet( newNet );
+                        }
+                    }
+                }
+            };
+
+   auto cloneAndAdd =
+            [&] ( EDA_ITEM* aItem )
+            {
+                if( !aItem->IsBOARD_ITEM() )
+                    return static_cast<BOARD_ITEM*>( nullptr );
+
+                BOARD_ITEM* copy = static_cast<BOARD_ITEM*>( aItem->Clone() );
+                tempBoard->Add( copy, ADD_MODE::APPEND, false );
+                return copy;
+            };
+
+    // Copy the selected items to the temporary board
+    for( EDA_ITEM* item : selection )
+    {
+        BOARD_ITEM* copy = cloneAndAdd( item );
+
+        if( !copy )
+            continue;
+
+        copy->SetParentGroup( nullptr );
+
+        if( copy->Type() == PCB_FOOTPRINT_T )
+        {
+            static_cast<FOOTPRINT*>( copy )->RunOnChildren( addNetIfNeeded, RECURSE_MODE::NO_RECURSE );
+        }
+        else if( copy->Type() == PCB_GROUP_T || copy->Type() == PCB_GENERATOR_T )
+        {
+            // Clone() produces a shallow copy whose m_items still references original
+            // children. Replace with DeepClone() which recursively clones all children
+            // with correct group membership.
+            tempBoard->Remove( copy );
+
+            PCB_GROUP* deepCopy = nullptr;
+
+            if( item->Type() == PCB_GENERATOR_T )
+                deepCopy = static_cast<PCB_GENERATOR*>( item )->DeepClone();
+            else
+                deepCopy = static_cast<PCB_GROUP*>( item )->DeepClone();
+
+            deepCopy->SetParentGroup( nullptr );
+            tempBoard->Add( deepCopy, ADD_MODE::APPEND, false );
+
+            deepCopy->RunOnChildren(
+                    [&]( BOARD_ITEM* child )
+                    {
+                        tempBoard->Add( child, ADD_MODE::APPEND, false );
+                        addNetIfNeeded( child );
+                    },
+                    RECURSE_MODE::RECURSE );
+
+            delete copy;
+        }
+        else
+            addNetIfNeeded( copy );
+    }
+
+    return ccWriteDesignBlockBoard( tempBoard, aFolder, aName, aLines );
+}
+
+#endif // __EMSCRIPTEN__
