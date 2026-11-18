@@ -22,6 +22,10 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: K-REMAP, a KiCad 5 project opened and saved
+ * by the WebAssembly host (CcLegacyHostBegin) remaps and rescues with no window, every
+ * message a line on the host's reporter.
  */
 
 
@@ -91,6 +95,41 @@
 #include "widgets/filedlg_hook_save_project.h"
 #include "widgets/panel_remote_symbol.h"
 #include "save_project_utils.h"
+
+#ifdef __EMSCRIPTEN__
+// Engine run 15, K-REMAP. While the host's legacy open is active (kicadImportLegacyProject:
+// CcLegacyHostBegin, OpenProjectFiles, SaveProject, CcLegacyHostEnd) the legacy load runs
+// DIALOG_SYMBOL_REMAP's body with no window and takes every rescue candidate, and each box
+// the load or the save would show becomes a line on the host's reporter.
+static REPORTER* s_ccLegacyHost = nullptr;
+
+
+/// The host's legacy open begins: aReporter (owned by the host) takes every line from now.
+void CcLegacyHostBegin( REPORTER* aReporter )
+{
+    s_ccLegacyHost = aReporter;
+}
+
+
+bool CcLegacyHostActive()
+{
+    return s_ccLegacyHost != nullptr;
+}
+
+
+/// The host's legacy open ends: KiCad's own windows again.
+void CcLegacyHostEnd()
+{
+    s_ccLegacyHost = nullptr;
+}
+
+
+// dialog_symbol_remap.cpp and project_rescue.cpp (the same WebAssembly build).
+bool CcRemapLegacySymbols( SCH_EDIT_FRAME* aFrame, REPORTER& aReporter );
+int  CcMigrateProjectLegacyLibs( PROJECT& aPrj, REPORTER& aReporter );
+void CcSetRescueHeadless( REPORTER* aReporter );
+REPORTER* CcRescueHeadless();
+#endif
 
 bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, int aCtl )
 {
@@ -233,6 +272,31 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
             // And when a schematic file is loaded, we need these libs to initialize
             // some parameters (links to PART LIB, dangling ends ...)
             Prj().SetElem( PROJECT::ELEM::LEGACY_SYMBOL_LIBS, nullptr );
+#ifdef __EMSCRIPTEN__
+            if( s_ccLegacyHost )
+            {
+                // PROJECT_SCH::LegacySchLibs's own load, its "Not Found" box a line: a KiCad 5
+                // project names libraries the browser does not hold; only the cache matters.
+                LEGACY_SYMBOL_LIBS* legacyLibs = new LEGACY_SYMBOL_LIBS();
+                Prj().SetElem( PROJECT::ELEM::LEGACY_SYMBOL_LIBS, legacyLibs );
+
+                try
+                {
+                    legacyLibs->LoadAllLibraries( &Prj() );
+                }
+                catch( const PARSE_ERROR& pe )
+                {
+                    s_ccLegacyHost->Report( _( "The following libraries were not found:" ) + wxS( " " )
+                                                    + wxString( UTF8( pe.inputLine ).wx_str() ),
+                                            RPT_SEVERITY_WARNING );
+                }
+                catch( const IO_ERROR& ioe )
+                {
+                    s_ccLegacyHost->Report( ioe.What(), RPT_SEVERITY_ERROR );
+                }
+            }
+            else
+#endif
             PROJECT_SCH::LegacySchLibs( &Prj() );
         }
     }
@@ -446,6 +510,13 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
 
         if( sheetList.IsModified() )
         {
+#ifdef __EMSCRIPTEN__
+            if( s_ccLegacyHost )
+                s_ccLegacyHost->Report( _( "An error was found when loading the schematic that has "
+                                           "been automatically fixed." ),
+                                        RPT_SEVERITY_WARNING );
+            else
+#endif
             DisplayInfoMessage( this,
                                 _( "An error was found when loading the schematic that has "
                                    "been automatically fixed.  Please save the schematic to "
@@ -495,9 +566,18 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
             // Convert old projects over to use symbol library table.
             if( schematic.HasNoFullyDefinedLibIds() )
             {
-                DIALOG_SYMBOL_REMAP dlgRemap( this );
+#ifdef __EMSCRIPTEN__
+                if( s_ccLegacyHost )
+                {
+                    CcRemapLegacySymbols( this, *s_ccLegacyHost );
+                }
+                else
+#endif
+                {
+                    DIALOG_SYMBOL_REMAP dlgRemap( this );
 
-                dlgRemap.ShowQuasiModal();
+                    dlgRemap.ShowQuasiModal();
+                }
             }
             else
             {
@@ -510,6 +590,16 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
 
                 if( !libNames.IsEmpty() )
                 {
+#ifdef __EMSCRIPTEN__
+                    if( s_ccLegacyHost )
+                    {
+                        s_ccLegacyHost->Report( _( "Symbol libraries defined in the project file "
+                                                   "symbol library list are no longer supported "
+                                                   "and will be removed." ),
+                                                RPT_SEVERITY_WARNING );
+                    }
+                    else
+#endif
                     if( eeconfig()->m_Appearance.show_illegal_symbol_lib_dialog )
                     {
                         wxRichMessageDialog invalidLibDlg(
@@ -610,6 +700,18 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
                     }
                 }
 
+#ifdef __EMSCRIPTEN__
+                if( s_ccLegacyHost && !cacheExists )
+                {
+                    // Every candidate taken, no DIALOG_RESCUE_EACH (project_rescue.cpp).
+                    REPORTER* outer = CcRescueHeadless();
+                    CcSetRescueHeadless( s_ccLegacyHost );
+                    SCH_EDITOR_CONTROL* editor = m_toolManager->GetTool<SCH_EDITOR_CONTROL>();
+                    editor->RescueSymbolLibTableProject( false );
+                    CcSetRescueHeadless( outer );
+                }
+                else
+#endif
                 if( ( !cfg || !cfg->m_RescueNeverShow ) && !cacheExists )
                 {
                     SCH_EDITOR_CONTROL* editor = m_toolManager->GetTool<SCH_EDITOR_CONTROL>();
@@ -641,6 +743,15 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
                             "the schematic or recovery of the symbol cache library file and "
                             "reloading the schematic is required." );
 
+#ifdef __EMSCRIPTEN__
+                // The host's open takes "Load Without Cache File" and says why.
+                if( s_ccLegacyHost )
+                {
+                    s_ccLegacyHost->Report( msg, RPT_SEVERITY_WARNING );
+                }
+                else
+                {
+#endif
                 KICAD_MESSAGE_DIALOG dlgMissingCache( this, msg, _( "Warning" ),
                                                       wxOK | wxCANCEL | wxICON_EXCLAMATION | wxCENTER );
                 dlgMissingCache.SetExtendedMessage( extMsg );
@@ -653,16 +764,53 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
                     CreateDefaultScreens();
                     return false;
                 }
+#ifdef __EMSCRIPTEN__
+                }
+#endif
             }
+
+#ifdef __EMSCRIPTEN__
+            // The rescue libraries and the cache the load wrote are legacy .lib files: the
+            // host's open saves them as .kicad_sym with their table rows (the symbol library
+            // table panel's Migrate Libraries), so the saved project is KiCad 10 throughout.
+            if( s_ccLegacyHost )
+                CcMigrateProjectLegacyLibs( Prj(), *s_ccLegacyHost );
+#endif
 
             // Update all symbol library links for all sheets.
             schematic.UpdateSymbolLinks( &loadReporter );
 
+#ifdef __EMSCRIPTEN__
+            // The load's own lines (the parser's, the links' just above) join the host's.
+            if( s_ccLegacyHost && !loadReporter.GetMessages().IsEmpty() )
+            {
+                wxArrayString loadLines = wxSplit( loadReporter.GetMessages(), '\n', '\0' );
+
+                for( const wxString& line : loadLines )
+                {
+                    if( !line.IsEmpty() )
+                        s_ccLegacyHost->Report( line, RPT_SEVERITY_WARNING );
+                }
+            }
+#endif
+
+#ifdef __EMSCRIPTEN__
+            // No info bar under the host's open: it converts and saves at once.
+            if( !s_ccLegacyHost )
+            {
+                m_infoBar->RemoveAllButtons();
+                m_infoBar->AddCloseButton();
+                m_infoBar->ShowMessage( _( "This file was created by an older version of KiCad. "
+                                           "It will be converted to the new format when saved." ),
+                                        wxICON_WARNING, WX_INFOBAR::MESSAGE_TYPE::OUTDATED_SAVE );
+            }
+#else
             m_infoBar->RemoveAllButtons();
             m_infoBar->AddCloseButton();
             m_infoBar->ShowMessage( _( "This file was created by an older version of KiCad. "
                                        "It will be converted to the new format when saved." ),
                                     wxICON_WARNING, WX_INFOBAR::MESSAGE_TYPE::OUTDATED_SAVE );
+#endif
 
             // Legacy schematic can have duplicate time stamps so fix that before converting
             // to the s-expression format.
@@ -1181,6 +1329,16 @@ bool SCH_EDIT_FRAME::SaveProject( bool aSaveAs )
     // a Save As Copy operation.
     std::unordered_map<SCH_SCREEN*, wxString> filenameMap;
 
+#ifdef __EMSCRIPTEN__
+    // The host's legacy open saves into the project it opened, never through a file chooser.
+    if( s_ccLegacyHost && ( Prj().IsNullProject() || aSaveAs ) )
+    {
+        s_ccLegacyHost->Report( _( "The schematic has no project to save into." ),
+                                RPT_SEVERITY_ERROR );
+        return false;
+    }
+#endif
+
     // Handle "Save As" and saving a new project/schematic for the first time in standalone
     if( Prj().IsNullProject() || aSaveAs )
     {
@@ -1322,6 +1480,15 @@ bool SCH_EDIT_FRAME::SaveProject( bool aSaveAs )
                 msg += "\n" + lockedFile;
         }
 
+#ifdef __EMSCRIPTEN__
+        if( s_ccLegacyHost )
+        {
+            s_ccLegacyHost->Report( _( "You do not have write permissions to:\n\n" ) + msg,
+                                    RPT_SEVERITY_ERROR );
+            return false;
+        }
+#endif
+
         wxRichMessageDialog dlg( this, wxString::Format( _( "Failed to save %s." ),
                                                          Schematic().Root().GetFileName() ),
                                  _( "Locked File Warning" ),
@@ -1342,6 +1509,28 @@ bool SCH_EDIT_FRAME::SaveProject( bool aSaveAs )
                 msg += "\n" + overwrittenFile;
         }
 
+#ifdef __EMSCRIPTEN__
+        // The host's legacy open writes the KiCad 10 files over any it was given: it
+        // keeps the files it dropped itself.
+        if( s_ccLegacyHost )
+        {
+            s_ccLegacyHost->Report( _( "The following files will be overwritten:\n\n" ) + msg,
+                                    RPT_SEVERITY_INFO );
+        }
+        else
+        {
+            wxRichMessageDialog dlg( this, _( "Saving will overwrite existing files." ),
+                                     _( "Save Warning" ),
+                                     wxOK | wxCANCEL | wxCANCEL_DEFAULT | wxCENTER |
+                                     wxICON_EXCLAMATION );
+            dlg.ShowDetailedText( _( "The following files will be overwritten:\n\n" ) + msg );
+            dlg.SetOKCancelLabels( KICAD_MESSAGE_DIALOG::ButtonLabel( _( "Overwrite Files" ) ),
+                                   KICAD_MESSAGE_DIALOG::ButtonLabel( _( "Abort Project Save" ) ) );
+
+            if( dlg.ShowModal() == wxID_CANCEL )
+                return false;
+        }
+#else
         wxRichMessageDialog dlg( this, _( "Saving will overwrite existing files." ),
                                  _( "Save Warning" ),
                                  wxOK | wxCANCEL | wxCANCEL_DEFAULT | wxCENTER |
@@ -1352,6 +1541,7 @@ bool SCH_EDIT_FRAME::SaveProject( bool aSaveAs )
 
         if( dlg.ShowModal() == wxID_CANCEL )
             return false;
+#endif
     }
 
     screens.BuildClientSheetPathList();
