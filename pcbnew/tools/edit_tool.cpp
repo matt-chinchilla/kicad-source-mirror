@@ -22,6 +22,10 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: under __EMSCRIPTEN__ EDIT_TOOL::Properties in
+ * the footprint editor asks the WebAssembly editor's host (window.kicadHostFpEdit) before
+ * KiCad's item dialogs, by item kind.
  */
 
 #include <macros.h>
@@ -62,6 +66,7 @@
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #include <json_common.h>
+#include <tools/footprint_editor_host.h>
 #endif
 #include <tools/pad_tool.h>
 #include <view/view_controls.h>
@@ -2382,6 +2387,49 @@ static BOARD_ITEM* hostPropertiesSubject( BOARD_ITEM* aItem, const char*& aKind,
         return nullptr;
     }
 }
+
+
+// The footprint editor's ask for one selected item (window.kicadHostFpEdit, engine run 15):
+// the ask named by the item's kind, and the item the host's window edits (a table cell gives
+// way to its table; the footprint itself is asked with no uuid). nullptr when the host's
+// window has no form for this kind (KiCad's dialog then opens as before).
+static BOARD_ITEM* fpEditAskSubject( BOARD_ITEM* aItem, const char*& aAsk )
+{
+    switch( aItem->Type() )
+    {
+    case PCB_FOOTPRINT_T:       aAsk = "footprint"; return aItem;
+    case PCB_PAD_T:             aAsk = "pad";       return aItem;
+    case PCB_FIELD_T:           aAsk = "field";     return aItem;
+    case PCB_TEXT_T:            aAsk = "text";      return aItem;
+    case PCB_TEXTBOX_T:         aAsk = "textbox";   return aItem;
+    case PCB_SHAPE_T:           aAsk = "shape";     return aItem;
+    case PCB_ZONE_T:            aAsk = "zone";      return aItem;
+    case PCB_TABLE_T:           aAsk = "table";     return aItem;
+    case PCB_BARCODE_T:         aAsk = "barcode";   return aItem;
+    case PCB_REFERENCE_IMAGE_T: aAsk = "image";     return aItem;
+    case PCB_POINT_T:           aAsk = "point";     return aItem;
+
+    case PCB_DIM_ALIGNED_T:
+    case PCB_DIM_LEADER_T:
+    case PCB_DIM_CENTER_T:
+    case PCB_DIM_RADIAL_T:
+    case PCB_DIM_ORTHOGONAL_T:
+        aAsk = "dimension";
+        return aItem;
+
+    case PCB_TABLECELL_T:
+        if( aItem->GetParent() && aItem->GetParent()->Type() == PCB_TABLE_T )
+        {
+            aAsk = "table";
+            return static_cast<BOARD_ITEM*>( aItem->GetParent() );
+        }
+
+        return nullptr;
+
+    default:
+        return nullptr;
+    }
+}
 #endif
 
 
@@ -2410,6 +2458,31 @@ int EDIT_TOOL::Properties( const TOOL_EVENT& aEvent )
             PCB_SELECTION& sel = m_selectionTool->GetSelection();
 
             if( sel.GetSize() != 1 || sel.Front() != asked )
+            {
+                m_selectionTool->ClearSelection( true );
+                m_selectionTool->AddItemToSel( asked );
+            }
+
+            m_selectionTool->GetSelection().SetIsHover( false );
+            return 0;
+        }
+    }
+
+    // The footprint editor's item dialogs go to the host first (window.kicadHostFpEdit): a
+    // held ask opens no KiCad dialog and leaves the asked item the one selected, no longer a
+    // hover selection. The footprint itself is asked with no uuid.
+    if( m_isFootprintEditor && selection.Size() == 1 && selection.Front()->IsBOARD_ITEM() )
+    {
+        const char* ask = nullptr;
+        BOARD_ITEM* asked = fpEditAskSubject( static_cast<BOARD_ITEM*>( selection.Front() ), ask );
+
+        if( asked && CcAskHostFpEdit( ask, asked->Type() == PCB_FOOTPRINT_T ? nullptr
+                                                                         : &asked->m_Uuid,
+                                      false ) )
+        {
+            PCB_SELECTION& sel = m_selectionTool->GetSelection();
+
+            if( asked->Type() != PCB_FOOTPRINT_T && ( sel.GetSize() != 1 || sel.Front() != asked ) )
             {
                 m_selectionTool->ClearSelection( true );
                 m_selectionTool->AddItemToSel( asked );
