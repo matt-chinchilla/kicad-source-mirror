@@ -6,7 +6,10 @@
  * @author Maciej Suminski <maciej.suminski@cern.ch>
  * Modified by Circuit Center Inc on 2026-11-18: in the WebAssembly editor Place Design Block
  * takes a block the host handed in (cc_host_design_block.h) before the Design Blocks pane, with
- * the host's place as group option in place of the chooser's setting (engine run 15, K-B1).
+ * the host's place as group option in place of the chooser's setting (engine run 15, K-B1);
+ * Apply Design Block Layout with a host reporter set (cc_host_block_layout.h) fills its record in
+ * place of its message box, progress window and info bar lines (engine run 15, K-B2); Paste
+ * Special takes the host's choices (cc_paste_special.h) in place of its dialog (K-PASTE).
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -101,7 +104,9 @@
 using namespace std::placeholders;
 
 #ifdef __EMSCRIPTEN__
+#include <cc_host_block_layout.h>
 #include <cc_host_design_block.h>
+#include <cc_paste_special.h>
 
 // K-B1: while a host block is appended, its place as group option stands in for the Design
 // Blocks chooser's setting that AppendBoard reads (-1: none, the chooser's setting is read).
@@ -1233,6 +1238,19 @@ int PCB_CONTROL::Paste( const TOOL_EVENT& aEvent )
 
     if( aEvent.IsAction( &ACTIONS::pasteSpecial ) )
     {
+#ifdef __EMSCRIPTEN__
+        // K-PASTE: the host's choices in place of the dialog (Clear Nets only for a board clip,
+        // as the dialog hides the box for any other)
+        if( std::optional<CC_PASTE_SPECIAL> host = ccTakePasteSpecial() )
+        {
+            mode = host->mode == 0   ? PASTE_MODE::UNIQUE_ANNOTATIONS
+                   : host->mode == 2 ? PASTE_MODE::REMOVE_ANNOTATIONS
+                                     : PASTE_MODE::KEEP_ANNOTATIONS;
+            clear_nets = clipItem->Type() == PCB_T && host->clearNets;
+        }
+        else
+        {
+#endif
         DIALOG_PASTE_SPECIAL dlg( m_frame, &mode, defaultRef );
 
         if( clipItem->Type() != PCB_T )
@@ -1242,6 +1260,9 @@ int PCB_CONTROL::Paste( const TOOL_EVENT& aEvent )
             return 0;
 
         clear_nets = dlg.GetClearNets();
+#ifdef __EMSCRIPTEN__
+        }
+#endif
     }
 
     if( clipItem->Type() == PCB_T )
@@ -1530,6 +1551,12 @@ int PCB_CONTROL::ApplyDesignBlockLayout( const TOOL_EVENT& aEvent )
 
     if( linkedGroups.empty() )
     {
+#ifdef __EMSCRIPTEN__
+        if( CC_HOST_BLOCK_LAYOUT_REPORT* report = ccHostBlockLayoutReport() )
+            report->skippedNoLink = skippedNoLink;
+
+        if( !ccHostBlockLayoutLine( _( "No groups with a linked design block are selected." ) ) )
+#endif
         m_frame->ShowInfoBarError( _( "No groups with a linked design block are selected." ), true );
         return 1;
     }
@@ -1555,6 +1582,10 @@ int PCB_CONTROL::ApplyDesignBlockLayout( const TOOL_EVENT& aEvent )
 
         if( hasLocked )
         {
+#ifdef __EMSCRIPTEN__
+            if( !ccHostBlockLayoutLine( _( "Selection contains locked items. "
+                                           "Enable 'Override locks' to operate on them." ) ) )
+#endif
             m_frame->ShowInfoBarWarning( _( "Selection contains locked items. "
                                             "Enable 'Override locks' to operate on them." ),
                                          true );
@@ -1577,7 +1608,11 @@ int PCB_CONTROL::ApplyDesignBlockLayout( const TOOL_EVENT& aEvent )
 
     std::unique_ptr<WX_PROGRESS_REPORTER> progress;
 
+#ifdef __EMSCRIPTEN__
+    if( linkedGroups.size() > 1 && Pgm().IsGUI() && !ccHostBlockLayoutReport() )
+#else
     if( linkedGroups.size() > 1 && Pgm().IsGUI() )
+#endif
     {
         progress = std::make_unique<WX_PROGRESS_REPORTER>( m_frame, _( "Applying Design Block Layouts" ),
                                                            (int) linkedGroups.size(), PR_CAN_ABORT );
@@ -1813,12 +1848,30 @@ int PCB_CONTROL::ApplyDesignBlockLayout( const TOOL_EVENT& aEvent )
         sharedCommit.Push( wxString::Format( _( "Apply design block layout to %d group(s)" ), applied ) );
 
         if( netlessCopperPlaced )
+#ifdef __EMSCRIPTEN__
+        if( !ccHostBlockLayoutLine( _( "Copied copper has no net assigned. Assign nets to connect it." ) ) )
+#endif
             m_frame->ShowInfoBarMsg( _( "Copied copper has no net assigned. Assign nets to connect it." ), true );
     }
     else
     {
         sharedCommit.Revert();
     }
+
+#ifdef __EMSCRIPTEN__
+    // K-B2: the host's record in place of the summary box.
+    if( CC_HOST_BLOCK_LAYOUT_REPORT* report = ccHostBlockLayoutReport() )
+    {
+        report->applied = applied;
+        report->linked = (int) linkedGroups.size();
+        report->skippedNoLink = skippedNoLink;
+
+        for( const Failure& f : failures )
+            report->failures.push_back( { f.group->m_Uuid, f.reason } );
+
+        return applied > 0 ? 0 : 1;
+    }
+#endif
 
     if( skippedNoLink > 0 || !failures.empty() || linkedGroups.size() > 1 )
     {
