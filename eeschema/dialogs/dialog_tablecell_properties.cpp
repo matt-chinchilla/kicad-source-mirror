@@ -19,6 +19,10 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: DIALOG_TABLECELL_PROPERTIES asks the in-browser
+ * editor's host to answer it (host_prompt.h, ask tableCell) before KiCad's own dialog shows
+ * (WebAssembly build only).
  */
 
 #include <gr_text.h>
@@ -34,6 +38,285 @@
 #include <tool/tool_manager.h>
 #include <dialogs/html_message_box.h>
 #include <dialog_tablecell_properties.h>
+
+#ifdef __EMSCRIPTEN__
+#include <cmath>
+#include <limits>
+#include <optional>
+#include <host_prompt.h>
+
+
+/// A color as the in-browser editor's records carry it: "#rrggbbaa", "" when unspecified.
+[[maybe_unused]] static std::string ccTableColor( const KIGFX::COLOR4D& aColor )
+{
+    if( aColor == KIGFX::COLOR4D::UNSPECIFIED )
+        return std::string();
+
+    return aColor.ToHexString().Lower().ToStdString( wxConvUTF8 );
+}
+
+
+/// "" is unspecified, "#rrggbb" or "#rrggbbaa" a color; anything else is refused.
+[[maybe_unused]] static bool ccTableColorOf( const nlohmann::json& aValue, KIGFX::COLOR4D& aColor )
+{
+    if( !aValue.is_string() )
+        return false;
+
+    const std::string text = aValue.get<std::string>();
+
+    if( text.empty() )
+    {
+        aColor = KIGFX::COLOR4D::UNSPECIFIED;
+        return true;
+    }
+
+    KIGFX::COLOR4D color;
+
+    if( ( text.size() != 7 && text.size() != 9 )
+        || !color.SetFromHexString( wxString::FromUTF8( text ) ) )
+    {
+        return false;
+    }
+
+    aColor = color;
+    return true;
+}
+
+
+[[maybe_unused]] static const char* const CC_TABLE_STYLES[] = { "solid", "dash", "dot", "dashdot", "dashdotdot" };
+
+
+/// The name of the line style a style combo's selection stands for (lineTypeNames' order).
+[[maybe_unused]] static std::string ccTableStyle( int aSelection )
+{
+    if( aSelection < 0 || aSelection >= (int) lineTypeNames.size() )
+        aSelection = 0;
+
+    auto it = lineTypeNames.begin();
+    std::advance( it, aSelection );
+
+    const int style = static_cast<int>( it->first );
+
+    return ( style >= 0 && style < 5 ) ? CC_TABLE_STYLES[style] : CC_TABLE_STYLES[0];
+}
+
+
+/// The style combo's selection for a style name, -1 when the name is not one.
+[[maybe_unused]] static int ccTableStyleSelection( const nlohmann::json& aValue )
+{
+    if( !aValue.is_string() )
+        return -1;
+
+    const std::string name = aValue.get<std::string>();
+
+    for( int ii = 0; ii < 5; ++ii )
+    {
+        if( name != CC_TABLE_STYLES[ii] )
+            continue;
+
+        auto it = lineTypeNames.find( static_cast<LINE_STYLE>( ii ) );
+
+        return it == lineTypeNames.end() ? -1
+                                         : (int) std::distance( lineTypeNames.begin(), it );
+    }
+
+    return -1;
+}
+
+
+/// A length in millimeters to internal units, refused when not a finite number in range.
+[[maybe_unused]] static bool ccTableLength( const nlohmann::json& aValue, const EDA_IU_SCALE& aScale,
+                           long long& aIU )
+{
+    if( !aValue.is_number() )
+        return false;
+
+    const double mm = aValue.get<double>();
+
+    if( !std::isfinite( mm ) )
+        return false;
+
+    const double iu = std::round( mm * aScale.IU_PER_MM );
+
+    if( std::fabs( iu ) > (double) std::numeric_limits<int>::max() )
+        return false;
+
+    aIU = static_cast<long long>( iu );
+    return true;
+}
+
+/// The table cell answer's keys both editors share, read whole before anything is written.
+struct CC_CELL_IN
+{
+    std::optional<std::string> text;
+    std::optional<std::string> font;
+    std::optional<bool>        bold;
+    std::optional<bool>        italic;
+    std::optional<int>         hAlign;     ///< 0 left, 1 center, 2 right
+    std::optional<int>         vAlign;     ///< 0 top, 1 center, 2 bottom
+    std::optional<long long>   margins[4]; ///< left, top, right, bottom
+    bool                       editTable = false;
+};
+
+
+/// Reads the shared keys; a null or a missing key leaves its value as it is. A key this editor
+/// does not have (aForeign) is taken only as null.
+[[maybe_unused]] static bool ccCellIn( const nlohmann::json& aAnswer, const EDA_IU_SCALE& aScale,
+                                       std::initializer_list<const char*> aForeign,
+                                       CC_CELL_IN& aIn, std::string& aField )
+{
+    aField.clear();
+
+    if( !aAnswer.is_object() )
+        return false;
+
+    auto given = [&]( const char* aKey )
+    {
+        aField = aKey;
+        return aAnswer.contains( aKey ) && !aAnswer[aKey].is_null();
+    };
+
+    for( const char* key : aForeign )
+    {
+        if( given( key ) )
+            return false;
+    }
+
+    if( given( "text" ) )
+    {
+        if( !aAnswer["text"].is_string() )
+            return false;
+
+        aIn.text = aAnswer["text"].get<std::string>();
+    }
+
+    if( given( "font" ) )
+    {
+        if( !aAnswer["font"].is_string() )
+            return false;
+
+        aIn.font = aAnswer["font"].get<std::string>();
+    }
+
+    for( const char* key : { "bold", "italic" } )
+    {
+        if( given( key ) )
+        {
+            if( !aAnswer[key].is_boolean() )
+                return false;
+
+            ( std::string( key ) == "bold" ? aIn.bold : aIn.italic ) = aAnswer[key].get<bool>();
+        }
+    }
+
+    auto alignOf = [&]( const char* aKey, std::initializer_list<const char*> aNames,
+                        std::optional<int>& aOut )
+    {
+        if( !given( aKey ) )
+            return true;
+
+        if( !aAnswer[aKey].is_string() )
+            return false;
+
+        int index = 0;
+
+        for( const char* name : aNames )
+        {
+            if( aAnswer[aKey].get<std::string>() == name )
+            {
+                aOut = index;
+                return true;
+            }
+
+            ++index;
+        }
+
+        return false;
+    };
+
+    if( !alignOf( "hAlign", { "left", "center", "right" }, aIn.hAlign )
+        || !alignOf( "vAlign", { "top", "center", "bottom" }, aIn.vAlign ) )
+    {
+        return false;
+    }
+
+    if( given( "margins" ) )
+    {
+        const nlohmann::json& margins = aAnswer["margins"];
+
+        if( !margins.is_object() )
+            return false;
+
+        int index = 0;
+
+        for( const char* side : { "left", "top", "right", "bottom" } )
+        {
+            if( margins.contains( side ) && !margins[side].is_null() )
+            {
+                aField = std::string( "margins." ) + side;
+                long long iu = 0;
+
+                if( !ccTableLength( margins[side], aScale, iu ) || iu < 0 )
+                    return false;
+
+                aIn.margins[index] = iu;
+            }
+
+            ++index;
+        }
+    }
+
+    if( given( "editTable" ) )
+    {
+        if( !aAnswer["editTable"].is_boolean() )
+            return false;
+
+        aIn.editTable = aAnswer["editTable"].get<bool>();
+    }
+
+    aField.clear();
+    return true;
+}
+
+
+/// The alignment a row of three radio buttons shows, null when none is checked.
+[[maybe_unused]] static nlohmann::json ccCellAlign( BITMAP_BUTTON* aFirst, BITMAP_BUTTON* aSecond,
+                                                    BITMAP_BUTTON* aThird, const char* aFirstName,
+                                                    const char* aThirdName )
+{
+    if( aFirst->IsChecked() )
+        return aFirstName;
+
+    if( aSecond->IsChecked() )
+        return "center";
+
+    if( aThird->IsChecked() )
+        return aThirdName;
+
+    return nullptr;
+}
+
+
+/// Checks one button of a row of three (the dialog's own radio behavior), the others off.
+[[maybe_unused]] static void ccCellAlignSet( BITMAP_BUTTON* aFirst, BITMAP_BUTTON* aSecond,
+                                             BITMAP_BUTTON* aThird, int aIndex )
+{
+    aFirst->Check( aIndex == 0 );
+    aSecond->Check( aIndex == 1 );
+    aThird->Check( aIndex == 2 );
+}
+
+
+/// A binder's value in millimeters, null when it shows mixed values.
+[[maybe_unused]] static nlohmann::json ccCellLength( const UNIT_BINDER& aBinder,
+                                                     const EDA_IU_SCALE& aScale )
+{
+    if( aBinder.IsIndeterminate() )
+        return nullptr;
+
+    return aScale.IUTomm( aBinder.GetValue() );
+}
+#endif // __EMSCRIPTEN__
 
 DIALOG_TABLECELL_PROPERTIES::DIALOG_TABLECELL_PROPERTIES( SCH_EDIT_FRAME* aFrame, std::vector<SCH_TABLECELL*> aCells ) :
         DIALOG_TABLECELL_PROPERTIES_BASE( aFrame ),
@@ -357,6 +640,9 @@ bool DIALOG_TABLECELL_PROPERTIES::TransferDataFromWindow()
         text.Replace( "\r", "" );
 #endif
 
+#ifdef __EMSCRIPTEN__
+        if( !m_ccKeepText )
+#endif
         cell->SetText( text );
 
         if( m_bold->Get3StateValue() == wxCHK_CHECKED )
@@ -457,3 +743,249 @@ void DIALOG_TABLECELL_PROPERTIES::OnFormattingHelp( wxHyperlinkEvent& aEvent )
 
     m_helpWindow = SCH_TEXT::ShowSyntaxHelp( this );
 }
+
+
+#ifdef __EMSCRIPTEN__
+int DIALOG_TABLECELL_PROPERTIES::ShowModal()
+{
+    switch( ccAskHost() )
+    {
+    case 1:  SetReturnCode( wxID_OK );     return wxID_OK;
+    case 0:  SetReturnCode( wxID_CANCEL ); return wxID_CANCEL;
+    default: return DIALOG_TABLECELL_PROPERTIES_BASE::ShowModal();
+    }
+}
+
+
+int DIALOG_TABLECELL_PROPERTIES::ShowQuasiModal()
+{
+    switch( ccAskHost() )
+    {
+    case 1:  SetReturnCode( wxID_OK );     return wxID_OK;
+    case 0:  SetReturnCode( wxID_CANCEL ); return wxID_CANCEL;
+    default: return DIALOG_TABLECELL_PROPERTIES_BASE::ShowQuasiModal();
+    }
+}
+
+
+int DIALOG_TABLECELL_PROPERTIES::ccAskHost()
+{
+    if( !TransferDataToWindow() )
+        return -1;
+
+    const EDA_IU_SCALE& scale = m_frame->GetIuScale();
+
+    nlohmann::json uuids = nlohmann::json::array();
+
+    for( SCH_TABLECELL* cell : m_cells )
+        uuids.push_back( cell->m_Uuid.AsStdString() );
+
+    auto threeState = []( wxCheckBox* aBox ) -> nlohmann::json
+    {
+        if( aBox->Get3StateValue() == wxCHK_UNDETERMINED )
+            return nullptr;
+
+        return aBox->Get3StateValue() == wxCHK_CHECKED;
+    };
+
+    nlohmann::json record;
+    record["uuids"] = uuids;
+    record["text"] = m_cells.size() == 1
+                             ? nlohmann::json( m_cellText->GetValue().ToStdString( wxConvUTF8 ) )
+                             : nlohmann::json();
+    record["font"] = m_fontCtrl->GetSelection() < 0
+                             ? nlohmann::json()
+                             : nlohmann::json( m_fontCtrl->GetStringSelection().ToStdString(
+                                       wxConvUTF8 ) );
+    record["bold"] = threeState( m_bold );
+    record["italic"] = threeState( m_italic );
+    record["hAlign"] = ccCellAlign( m_hAlignLeft, m_hAlignCenter, m_hAlignRight, "left", "right" );
+    record["vAlign"] = ccCellAlign( m_vAlignTop, m_vAlignCenter, m_vAlignBottom, "top", "bottom" );
+    record["margins"] = { { "left", ccCellLength( m_marginLeft, scale ) },
+                          { "right", ccCellLength( m_marginRight, scale ) },
+                          { "top", ccCellLength( m_marginTop, scale ) },
+                          { "bottom", ccCellLength( m_marginBottom, scale ) } };
+    record["size"] = ccCellLength( m_textSize, scale );
+    record["width"] = nullptr;
+    record["height"] = nullptr;
+    record["thickness"] = nullptr;
+    record["autoThickness"] = nullptr;
+    record["textColor"] = m_textColorBook->GetSelection() == 1
+                                  ? nlohmann::json( ccTableColor(
+                                            m_textColorSwatch->GetSwatchColor() ) )
+                                  : nlohmann::json();
+
+    if( m_fillColorBook->GetSelection() == 1 )
+    {
+        const KIGFX::COLOR4D fill = m_fillColorSwatch->GetSwatchColor();
+
+        record["fill"] = { { "mode", fill == KIGFX::COLOR4D::UNSPECIFIED ? "none" : "color" },
+                           { "color", ccTableColor( fill ) } };
+    }
+    else
+    {
+        record["fill"] = nullptr;
+    }
+
+    class RECEIVER : public CC_PROMPT_RECEIVER
+    {
+    public:
+        RECEIVER( DIALOG_TABLECELL_PROPERTIES* aDialog, const EDA_IU_SCALE& aScale ) :
+                m_dialog( aDialog ),
+                m_scale( aScale )
+        {
+        }
+
+        bool CcApply( const nlohmann::json& aAnswer, std::string& aField ) override
+        {
+            DIALOG_TABLECELL_PROPERTIES* dlg = m_dialog;
+            CC_CELL_IN                   in;
+
+            // The schematic's cells have no width, height or pen thickness of their own.
+            if( !ccCellIn( aAnswer, m_scale, { "width", "height", "thickness", "autoThickness" },
+                           in, aField ) )
+            {
+                return false;
+            }
+
+            std::optional<long long>      size;
+            std::optional<KIGFX::COLOR4D> textColor;
+            std::optional<KIGFX::COLOR4D> fill;
+
+            if( aAnswer.contains( "size" ) && !aAnswer["size"].is_null() )
+            {
+                aField = "size";
+                long long iu = 0;
+
+                if( !ccTableLength( aAnswer["size"], m_scale, iu ) || iu <= 0 )
+                    return false;
+
+                size = iu;
+            }
+
+            if( aAnswer.contains( "textColor" ) && !aAnswer["textColor"].is_null() )
+            {
+                aField = "textColor";
+                KIGFX::COLOR4D color;
+
+                if( !ccTableColorOf( aAnswer["textColor"], color ) )
+                    return false;
+
+                textColor = color;
+            }
+
+            if( aAnswer.contains( "fill" ) && !aAnswer["fill"].is_null() )
+            {
+                aField = "fill";
+                const nlohmann::json& value = aAnswer["fill"];
+
+                if( !value.is_object() || !value.contains( "mode" )
+                    || !value["mode"].is_string() )
+                {
+                    return false;
+                }
+
+                const std::string mode = value["mode"].get<std::string>();
+
+                if( mode == "none" )
+                {
+                    fill = KIGFX::COLOR4D::UNSPECIFIED;
+                }
+                else if( mode == "color" )
+                {
+                    KIGFX::COLOR4D color;
+
+                    if( !value.contains( "color" ) || !ccTableColorOf( value["color"], color )
+                        || color == KIGFX::COLOR4D::UNSPECIFIED )
+                    {
+                        aField = "fill.color";
+                        return false;
+                    }
+
+                    fill = color;
+                }
+                else
+                {
+                    aField = "fill.mode";
+                    return false;
+                }
+            }
+
+            if( in.font && !dlg->m_fontCtrl->SetStringSelection( wxString::FromUTF8( *in.font ) ) )
+            {
+                aField = "font";
+                return false;
+            }
+
+            aField.clear();
+
+            // Write into the dialog's own controls.
+            if( in.text )
+                dlg->m_cellText->SetValue( wxString::FromUTF8( *in.text ) );
+
+            // KiCad's dialog writes the text it shows into every selected cell; with several
+            // cells and no text given, each cell keeps its own.
+            dlg->m_ccKeepText = !in.text && dlg->m_cells.size() > 1;
+
+            if( in.bold )
+                dlg->m_bold->Set3StateValue( *in.bold ? wxCHK_CHECKED : wxCHK_UNCHECKED );
+
+            if( in.italic )
+                dlg->m_italic->Set3StateValue( *in.italic ? wxCHK_CHECKED : wxCHK_UNCHECKED );
+
+            if( in.hAlign )
+            {
+                ccCellAlignSet( dlg->m_hAlignLeft, dlg->m_hAlignCenter, dlg->m_hAlignRight,
+                                *in.hAlign );
+            }
+
+            if( in.vAlign )
+            {
+                ccCellAlignSet( dlg->m_vAlignTop, dlg->m_vAlignCenter, dlg->m_vAlignBottom,
+                                *in.vAlign );
+            }
+
+            UNIT_BINDER* margins[4] = { &dlg->m_marginLeft, &dlg->m_marginTop,
+                                        &dlg->m_marginRight, &dlg->m_marginBottom };
+
+            for( int ii = 0; ii < 4; ++ii )
+            {
+                if( in.margins[ii] )
+                    margins[ii]->SetValue( *in.margins[ii] );
+            }
+
+            if( size )
+                dlg->m_textSize.SetValue( *size );
+
+            if( textColor )
+            {
+                dlg->m_textColorBook->SetSelection( 1 );
+                dlg->m_textColorSwatch->SetSwatchColor( *textColor, false );
+            }
+
+            if( fill )
+            {
+                dlg->m_fillColorBook->SetSelection( 1 );
+                dlg->m_fillColorSwatch->SetSwatchColor( *fill, false );
+            }
+
+            if( !dlg->TransferDataFromWindow() )
+                return false;
+
+            // The dialog's own Edit Table button: KiCad then shows (asks) the table.
+            if( in.editTable )
+                dlg->m_returnValue = TABLECELL_PROPS_EDIT_TABLE;
+
+            return true;
+        }
+
+    private:
+        DIALOG_TABLECELL_PROPERTIES* m_dialog;
+        const EDA_IU_SCALE&          m_scale;
+    };
+
+    RECEIVER receiver( this, scale );
+
+    return CcHostPromptModal( "tableCell", record, receiver );
+}
+#endif // __EMSCRIPTEN__
