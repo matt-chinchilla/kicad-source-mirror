@@ -3,6 +3,8 @@
  *
  * Copyright (C) 2014 SoftPLC Corporation, Dick Hollenbeck <dick@softplc.com>
  * Copyright The KiCad Developers, see AUTHORS.txt for contributors.
+ * Modified by Circuit Center Inc on 2026-11-18: the merged editor image registers the
+ * pl_editor kiface as a fourth face, so --frame=ds boots the drawing sheet editor.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -78,7 +80,7 @@
 KIWAY    Kiway( KFCTL_STANDALONE );
 
 #if defined(KICAD_MERGED_KIFACES)
-// WASM merged editor: the pcbnew, eeschema and cvpcb kifaces are statically linked
+// WASM merged editor: the pcbnew, eeschema, cvpcb and pl_editor kifaces are statically linked
 // side by side, each compiled with its own getter symbol via -DKIFACE_GETTER=<name>
 // (see KICAD_WASM_MERGED_EDITOR in the top-level CMakeLists.txt). All are registered
 // in OnPgmInit below.
@@ -88,6 +90,12 @@ extern "C" KIFACE* eeschema_kiface_getter( int* aKIFACEversion, int aKIWAYversio
                                            PGM_BASE* aProgram );
 extern "C" KIFACE* cvpcb_kiface_getter( int* aKIFACEversion, int aKIWAYversion,
                                         PGM_BASE* aProgram );
+#ifdef __EMSCRIPTEN__
+// The fourth face: the drawing sheet editor (pagelayout_editor/CMakeLists.txt's merged
+// block names its getter pl_editor_kiface_getter).
+extern "C" KIFACE* pl_editor_kiface_getter( int* aKIFACEversion, int aKIWAYversion,
+                                            PGM_BASE* aProgram );
+#endif
 #endif
 
 
@@ -392,7 +400,7 @@ bool PGM_SINGLE_TOP::OnPgmInit()
 
 #if defined(KICAD_MERGED_KIFACES)
 
-    // WASM merged editor (kicad_editor): THREE kifaces are statically linked into this
+    // WASM merged editor (kicad_editor): FOUR kifaces are statically linked into this
     // image, each compiled with a distinct KIFACE_GETTER name (kiway.h's macro is
     // #ifndef-guarded; see KICAD_WASM_MERGED_EDITOR in the top-level CMakeLists.txt).
     // Register all faces up front — OnKifaceStart still runs lazily on a face's first
@@ -407,6 +415,12 @@ bool PGM_SINGLE_TOP::OnPgmInit()
                       eeschema_kiface_getter( &kiface_version, KIFACE_VERSION, this ) );
     Kiway.set_kiface( KIWAY::FACE_CVPCB,
                       cvpcb_kiface_getter( &kiface_version, KIFACE_VERSION, this ) );
+#ifdef __EMSCRIPTEN__
+    // The drawing sheet editor (--frame=ds) is the fourth kiface; like the others its
+    // OnKifaceStart runs only on its first use, so a sch or pcb frame never starts it.
+    Kiway.set_kiface( KIWAY::FACE_PL_EDITOR,
+                      pl_editor_kiface_getter( &kiface_version, KIFACE_VERSION, this ) );
+#endif
 
 #elif !defined(BUILD_KIWAY_DLL)
 
@@ -586,6 +600,7 @@ bool PGM_SINGLE_TOP::OnPgmInit()
                 case FRAME_FOOTPRINT_EDITOR:  defaultExt = wxT( "kicad_mod" ); break;
                 case FRAME_SCH:               defaultExt = wxT( "kicad_sch" ); break;
                 case FRAME_SCH_SYMBOL_EDITOR: defaultExt = wxT( "kicad_sym" ); break;
+                case FRAME_PL_EDITOR:         defaultExt = wxT( "kicad_wks" ); break;
                 default:                                                       break;
                 }
 
