@@ -20,6 +20,10 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: in the WebAssembly build a host may run the
+ * rescue with no window (CcSetRescueHeadless): every candidate is taken in place of
+ * DIALOG_RESCUE_EACH and the message boxes become lines on the host's reporter.
  */
 
 #include <sch_draw_panel.h>
@@ -40,6 +44,28 @@
 #include <map>
 #include <pgm_base.h>
 #include <libraries/symbol_library_adapter.h>
+
+#ifdef __EMSCRIPTEN__
+#include <reporter.h>
+
+// The host's headless rescue (engine run 15): while a reporter is set, InvokeDialog takes
+// every candidate with no DIALOG_RESCUE_EACH and every message box of the rescue becomes a
+// line on that reporter. Set and cleared by the WebAssembly bindings and the K-REMAP path of
+// SCH_EDIT_FRAME::OpenProjectFiles; a plain build has neither function.
+static REPORTER* s_ccRescueHeadless = nullptr;
+
+
+void CcSetRescueHeadless( REPORTER* aReporter )
+{
+    s_ccRescueHeadless = aReporter;
+}
+
+
+REPORTER* CcRescueHeadless()
+{
+    return s_ccRescueHeadless;
+}
+#endif
 
 
 // Helper sort function, used in getSymbols, to sort a symbol list by lib_id
@@ -549,6 +575,14 @@ bool RESCUER::RescueProject( wxWindow* aParent, RESCUER& aRescuer, bool aRunning
     {
         if( aRunningOnDemand )
         {
+#ifdef __EMSCRIPTEN__
+            if( s_ccRescueHeadless )
+            {
+                s_ccRescueHeadless->Report( _( "This project has nothing to rescue." ),
+                                            RPT_SEVERITY_INFO );
+                return true;
+            }
+#endif
             KICAD_MESSAGE_DIALOG dlg( aParent, _( "This project has nothing to rescue." ),
                                       _( "Project Rescue Helper" ) );
             dlg.ShowModal();
@@ -564,6 +598,13 @@ bool RESCUER::RescueProject( wxWindow* aParent, RESCUER& aRescuer, bool aRunning
     // have clicked cancel by mistake, and should have some indication of that.
     if( !aRescuer.GetChosenCandidateCount() )
     {
+#ifdef __EMSCRIPTEN__
+        if( s_ccRescueHeadless )
+        {
+            s_ccRescueHeadless->Report( _( "No symbols were rescued." ), RPT_SEVERITY_INFO );
+            return true;
+        }
+#endif
         KICAD_MESSAGE_DIALOG dlg( aParent, _( "No symbols were rescued." ),
                                   _( "Project Rescue Helper" ) );
         dlg.ShowModal();
@@ -627,6 +668,21 @@ void LEGACY_RESCUER::FindCandidates()
 
 void LEGACY_RESCUER::InvokeDialog( wxWindow* aParent, bool aAskShowAgain )
 {
+#ifdef __EMSCRIPTEN__
+    if( s_ccRescueHeadless )
+    {
+        // Every candidate is taken, as DIALOG_RESCUE_EACH's OK with every row checked.
+        m_chosen_candidates.clear();
+
+        for( RESCUE_CANDIDATE& candidate : m_all_candidates )
+        {
+            m_chosen_candidates.push_back( &candidate );
+            s_ccRescueHeadless->Report( candidate.GetActionDescription(), RPT_SEVERITY_ACTION );
+        }
+
+        return;
+    }
+#endif
     InvokeDialogRescueEach( aParent, static_cast< RESCUER& >( *this ), m_currentSheet,
                             m_galBackEndType, aAskShowAgain );
 }
@@ -670,6 +726,16 @@ bool LEGACY_RESCUER::WriteRescueLibrary( wxWindow *aParent )
     }
     catch( ... /* IO_ERROR ioe */ )
     {
+#ifdef __EMSCRIPTEN__
+        if( s_ccRescueHeadless )
+        {
+            s_ccRescueHeadless->Report( wxString::Format( _( "Failed to create symbol library "
+                                                             "file '%s'." ),
+                                                          m_rescue_lib->GetFullFileName() ),
+                                        RPT_SEVERITY_ERROR );
+            return false;
+        }
+#endif
         DisplayError( aParent, wxString::Format( _( "Failed to create symbol library file '%s'." ),
                                                  m_rescue_lib->GetFullFileName() ) );
         return false;
@@ -766,6 +832,21 @@ void SYMBOL_LIB_TABLE_RESCUER::FindCandidates()
 
 void SYMBOL_LIB_TABLE_RESCUER::InvokeDialog( wxWindow* aParent, bool aAskShowAgain )
 {
+#ifdef __EMSCRIPTEN__
+    if( s_ccRescueHeadless )
+    {
+        // Every candidate is taken, as DIALOG_RESCUE_EACH's OK with every row checked.
+        m_chosen_candidates.clear();
+
+        for( RESCUE_CANDIDATE& candidate : m_all_candidates )
+        {
+            m_chosen_candidates.push_back( &candidate );
+            s_ccRescueHeadless->Report( candidate.GetActionDescription(), RPT_SEVERITY_ACTION );
+        }
+
+        return;
+    }
+#endif
     InvokeDialogRescueEach( aParent, static_cast< RESCUER& >( *this ), m_currentSheet,
                             m_galBackEndType, aAskShowAgain );
 }
@@ -819,6 +900,13 @@ bool SYMBOL_LIB_TABLE_RESCUER::WriteRescueLibrary( wxWindow *aParent )
     {
         wxString msg;
         msg.Printf( _( "Failed to save rescue library %s." ), fn.GetFullPath() );
+#ifdef __EMSCRIPTEN__
+        if( s_ccRescueHeadless )
+        {
+            s_ccRescueHeadless->Report( msg + wxS( " " ) + ioe.What(), RPT_SEVERITY_ERROR );
+            return false;
+        }
+#endif
         DisplayErrorMessage( aParent, msg, ioe.What() );
         return false;
     }
@@ -847,6 +935,20 @@ bool SYMBOL_LIB_TABLE_RESCUER::WriteRescueLibrary( wxWindow *aParent )
 
         bool success = true;
 
+#ifdef __EMSCRIPTEN__
+        if( s_ccRescueHeadless )
+        {
+            projectTable->Save().map_error(
+                    [&success]( const LIBRARY_ERROR& aError )
+                    {
+                        s_ccRescueHeadless->Report( _( "Error saving library table:\n\n" )
+                                                            + aError.message,
+                                                    RPT_SEVERITY_ERROR );
+                        success = false;
+                    } );
+        }
+        else
+#endif
         projectTable->Save().map_error(
                 [&success]( const LIBRARY_ERROR& aError )
                 {
