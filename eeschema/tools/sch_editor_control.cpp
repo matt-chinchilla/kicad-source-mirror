@@ -4,6 +4,9 @@
  * Copyright (C) 2019-2023 CERN
  * Copyright The KiCad Developers, see AUTHORS.txt for contributors.
  *
+ * Modified by Circuit Center Inc on 2026-11-18: in the WebAssembly editor Paste Special takes
+ * the host's choices (cc_paste_special.h) in place of its dialog (engine run 15, K-PASTE).
+ *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
  * as published by the Free Software Foundation; either version 2
@@ -106,6 +109,10 @@
 
 #ifdef KICAD_IPC_API
 #include <api/api_plugin_manager.h>
+#endif
+
+#ifdef __EMSCRIPTEN__
+#include <cc_paste_special.h>
 #endif
 
 
@@ -2177,10 +2184,24 @@ int SCH_EDITOR_CONTROL::Paste( const TOOL_EVENT& aEvent )
     if( aEvent.IsAction( &ACTIONS::pasteSpecial ) )
     {
         PASTE_MODE           defaultPasteMode = pasteMode;
+#ifdef __EMSCRIPTEN__
+        // K-PASTE: the host's choice in place of the dialog
+        if( std::optional<CC_PASTE_SPECIAL> host = ccTakePasteSpecial() )
+        {
+            pasteMode = host->mode == 0   ? PASTE_MODE::UNIQUE_ANNOTATIONS
+                        : host->mode == 2 ? PASTE_MODE::REMOVE_ANNOTATIONS
+                                          : PASTE_MODE::KEEP_ANNOTATIONS;
+        }
+        else
+        {
+#endif
         DIALOG_PASTE_SPECIAL dlg( m_frame, &pasteMode );
 
         if( dlg.ShowModal() == wxID_CANCEL )
             return 0;
+#ifdef __EMSCRIPTEN__
+        }
+#endif
 
         // We have to distinguish if removing was explicit
         forceRemoveAnnotations = pasteMode == PASTE_MODE::REMOVE_ANNOTATIONS && pasteMode != defaultPasteMode;
