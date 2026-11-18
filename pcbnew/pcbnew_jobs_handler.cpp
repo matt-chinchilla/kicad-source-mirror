@@ -13,6 +13,9 @@
  * Modified by Circuit Center Inc on 2026-11-18: the WebAssembly render job builds the scene before
  * its first pass and yields after it, after the last pass and before the picture is encoded, so
  * no step of a render holds the browser's main thread longer than it must.
+ * Modified by Circuit Center Inc on 2026-11-18: the WebAssembly render job reports the percent of
+ * the pass that finished the tracing, as KiCad's own reporter prints every pass's, and names the
+ * picture's own size in pixels (KiCad's raytracer rounds the size asked down to whole blocks).
  *
  * This program is free software: you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -1313,8 +1316,12 @@ static int ccJobExportRender( JOB* aJob, REPORTER* aReporter,
         ccRenderYield();
     }
 
-    // The pass that finished the tracing ran in the Redraw that answered false: a turn before
-    // the picture's buffers are made, so that pass and the encoding are two tasks.
+    // The pass that finished the tracing ran in the Redraw that answered false, so the loop body
+    // did not report it: its line here (KiCad's own reporter prints every pass's percent, 100 the
+    // last; a render with post processing reported it in the loop already, and no line repeats).
+    // Then a turn before the picture's buffers are made, so that pass and the encoding are two
+    // tasks.
+    passes.ReportPercent( *aReporter );
     ccRenderYield();
 
     uint8_t* rgbaBuffer = raytrace.GetBuffer();
@@ -1375,6 +1382,12 @@ static int ccJobExportRender( JOB* aJob, REPORTER* aReporter,
 
     if( success )
     {
+        // The raytracer draws whole blocks of rays, so the picture is GetRealBufferSize(), a
+        // little under the size asked (kicad-cli 10.0 writes 1568 by 1176 for 1600 by 1200, as
+        // this build does): the record names the file's own size.
+        aReporter->Report( wxString::Format( wxS( "The picture is %d by %d pixels." ),
+                                             realSize.x, realSize.y ),
+                           RPT_SEVERITY_INFO );
         aReporter->Report( _( "Successfully created 3D render image" ) + wxS( "\n" ), RPT_SEVERITY_INFO );
         return CLI::EXIT_CODES::OK;
     }
