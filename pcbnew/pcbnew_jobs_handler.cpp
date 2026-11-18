@@ -10,6 +10,9 @@
  * Modified by Circuit Center Inc on 2026-11-18: in the WebAssembly build the drill job's default
  * report path, built inside the output folder, is resolved once (resolved twice it named the
  * folder itself and the report failed with exit code 4).
+ * Modified by Circuit Center Inc on 2026-11-18: the WebAssembly render job builds the scene before
+ * its first pass and yields after it, after the last pass and before the picture is encoded, so
+ * no step of a render holds the browser's main thread longer than it must.
  *
  * This program is free software: you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -1273,6 +1276,12 @@ static int ccJobExportRender( JOB* aJob, REPORTER* aReporter,
     // could not load) reach the job's reporter as KiCad's own.
     CC_RENDER_PASSES passes;
 
+    // KiCad's own scene build (the step Redraw takes first while a reload is requested; Reload
+    // clears the request, so Redraw does not build it again), then a turn of the browser's
+    // event loop: built inside the first Redraw it shared one task with the preview pass.
+    raytrace.Reload( &passes, aReporter, false );
+    ccRenderYield();
+
     for( bool first = true; raytrace.Redraw( false, &passes, aReporter ); first = false )
     {
         if( first )
@@ -1303,6 +1312,10 @@ static int ccJobExportRender( JOB* aJob, REPORTER* aReporter,
         passes.ReportPercent( *aReporter );
         ccRenderYield();
     }
+
+    // The pass that finished the tracing ran in the Redraw that answered false: a turn before
+    // the picture's buffers are made, so that pass and the encoding are two tasks.
+    ccRenderYield();
 
     uint8_t* rgbaBuffer = raytrace.GetBuffer();
     wxSize   realSize = raytrace.GetRealBufferSize();
@@ -1350,6 +1363,11 @@ static int ccJobExportRender( JOB* aJob, REPORTER* aReporter,
         image = image.Mirror( false );
 
         image.SetOption( wxIMAGE_OPTION_QUALITY, 90 );
+
+        // A turn before the encoding: wx's PNG or JPEG writer runs whole, with no step of its
+        // own to yield between.
+        ccRenderYield();
+
         success = image.SaveFile( outPath, aRenderJob->m_format == JOB_PCB_RENDER::FORMAT::PNG
                                                    ? wxBITMAP_TYPE_PNG
                                                    : wxBITMAP_TYPE_JPEG );
