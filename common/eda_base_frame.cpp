@@ -22,12 +22,20 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: EDA_BASE_FRAME::OnLanguageSelectionEvent asks the
+ * in-browser editor's host (hostHoldsAction cc.Control.setLanguage) and a held press changes
+ * nothing (WebAssembly build only).
  */
 
 #include "dialogs/panel_maintenance.h"
 #include "kicad_manager_frame.h"
 #include <eda_base_frame.h>
 #include <nlohmann/json.hpp>
+
+#ifdef __EMSCRIPTEN__
+#include <tool/action_manager.h>
+#endif
 
 #include <advanced_config.h>
 #include <bitmaps.h>
@@ -2073,6 +2081,14 @@ void EDA_BASE_FRAME::AddMenuLanguageList( ACTION_MENU* aMasterMenu, TOOL_INTERAC
 void EDA_BASE_FRAME::OnLanguageSelectionEvent( wxCommandEvent& event )
 {
     int id = event.GetId();
+
+#ifdef __EMSCRIPTEN__
+    // K-HOLD: the Set Language items are a menu range, not tool actions; under the in-browser
+    // editor's host they ask with a name of ours (cc. prefix: KiCad has none), and a held press
+    // changes nothing.
+    if( hostHoldsAction( "cc.Control.setLanguage" ) )
+        return;
+#endif
 
     // tell all the KIWAY_PLAYERs about the language change.
     Kiway().SetLanguage( id );

@@ -20,6 +20,10 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: under __EMSCRIPTEN__ ShowModal asks the host
+ * (host_prompt.h, ask outset, modal) and writes its answer through the dialog's own controls and
+ * TransferDataFromWindow; a plain build is unchanged.
  */
 
 #include "dialogs/dialog_outset_items.h"
@@ -29,6 +33,13 @@
 #include <pcb_layer_box_selector.h>
 #include <wx/msgdlg.h>
 #include <confirm.h>
+
+#ifdef __EMSCRIPTEN__
+#include <cmath>
+#include <limits>
+#include <optional>
+#include <lset.h>
+#endif
 
 /**
  * Some handy preset values for common outset distances.
@@ -216,3 +227,231 @@ bool DIALOG_OUTSET_ITEMS::TransferDataFromWindow()
 
     return true;
 }
+
+
+#ifdef __EMSCRIPTEN__
+
+// The host prompt (host_prompt.h, ask "outset", modal). The record is what the dialog would show,
+// OUTSET_ROUTINE::PARAMETERS' keys (lengths in millimeters, gridRounding a length or null, the
+// layer by canonical name) with layers the ones its layer list offers; the answer (the same keys
+// but layers, any subset, closed) is written into its own controls and its own
+// TransferDataFromWindow fills the parameters (its "Line width must be a positive value." is
+// checked first and becomes the refusal's message).
+
+namespace
+{
+bool ccOutsetLength( const nlohmann::json& aValue, bool aPositive, long long& aIU )
+{
+    if( !aValue.is_number() || !std::isfinite( aValue.get<double>() ) )
+        return false;
+
+    const double iu = std::round( pcbIUScale.mmToIU( aValue.get<double>() ) );
+
+    if( iu < ( aPositive ? 1.0 : 0.0 )
+            || iu > static_cast<double>( std::numeric_limits<int>::max() ) )
+    {
+        return false;
+    }
+
+    aIU = static_cast<long long>( iu );
+    return true;
+}
+} // namespace
+
+
+int DIALOG_OUTSET_ITEMS::ShowModal()
+{
+    LoadControlState();
+    TransferDataToWindow();
+
+    nlohmann::json layers = nlohmann::json::array();
+
+    for( unsigned ii = 0; ii < m_LayerSelectionCtrl->GetCount(); ++ii )
+    {
+        const int layer = (int) (intptr_t) m_LayerSelectionCtrl->GetClientData( ii );
+
+        if( layer >= 0 && layer < PCB_LAYER_ID_COUNT )
+            layers.push_back( LSET::Name( ToLAYER_ID( layer ) ).ToStdString( wxConvUTF8 ) );
+    }
+
+    const int selected = m_LayerSelectionCtrl->GetLayerSelection();
+
+    nlohmann::json record;
+    record["outsetDistance"] = pcbIUScale.IUTomm( m_outset.GetIntValue() );
+    record["roundCorners"] = m_roundCorners->GetValue();
+    record["useSourceLayers"] = m_copyLayers->GetValue();
+    record["useSourceWidths"] = m_copyWidths->GetValue();
+    record["layer"] = selected >= 0 && selected < PCB_LAYER_ID_COUNT
+                              ? nlohmann::json( LSET::Name( ToLAYER_ID( selected ) )
+                                                        .ToStdString( wxConvUTF8 ) )
+                              : nlohmann::json( nullptr );
+    record["layers"] = layers;
+    record["lineWidth"] = pcbIUScale.IUTomm( m_lineWidth.GetIntValue() );
+    record["gridRounding"] = m_roundToGrid->IsChecked()
+                                     ? nlohmann::json( pcbIUScale.IUTomm(
+                                               m_roundingGrid.GetIntValue() ) )
+                                     : nlohmann::json( nullptr );
+    record["deleteSourceItems"] = m_deleteSourceItems->GetValue();
+
+    class RECEIVER : public CC_PROMPT_RECEIVER
+    {
+    public:
+        explicit RECEIVER( DIALOG_OUTSET_ITEMS* aDialog ) : m_dialog( aDialog ) {}
+
+        bool CcApply( const nlohmann::json& aAnswer, std::string& aField ) override
+        {
+            if( !aAnswer.is_object() )
+                return false;
+
+            // Read the whole answer first.
+            std::optional<long long> outset, lineWidth;
+            std::optional<int>       layer;
+            std::optional<bool>      roundCorners, useSourceLayers, useSourceWidths, deleteSources;
+            bool                     gridGiven = false;
+            std::optional<long long> grid;
+
+            for( auto it = aAnswer.begin(); it != aAnswer.end(); ++it )
+            {
+                const std::string& key = it.key();
+                bool               ok = true;
+                long long          iu = 0;
+
+                if( key == "outsetDistance" )
+                {
+                    ok = ccOutsetLength( *it, false, iu );
+                    outset = iu;
+                }
+                else if( key == "lineWidth" )
+                {
+                    ok = ccOutsetLength( *it, false, iu );
+                    lineWidth = iu;
+                }
+                else if( key == "gridRounding" )
+                {
+                    gridGiven = true;
+
+                    if( !it->is_null() )
+                    {
+                        ok = ccOutsetLength( *it, true, iu );
+                        grid = iu;
+                    }
+                }
+                else if( key == "layer" )
+                {
+                    ok = false;
+
+                    for( unsigned ii = 0; it->is_string()
+                                          && ii < m_dialog->m_LayerSelectionCtrl->GetCount();
+                         ++ii )
+                    {
+                        const int candidate =
+                                (int) (intptr_t) m_dialog->m_LayerSelectionCtrl->GetClientData( ii );
+
+                        if( candidate >= 0 && candidate < PCB_LAYER_ID_COUNT
+                                && LSET::Name( ToLAYER_ID( candidate ) )
+                                                   .ToStdString( wxConvUTF8 )
+                                           == it->get<std::string>() )
+                        {
+                            layer = candidate;
+                            ok = true;
+                            break;
+                        }
+                    }
+                }
+                else if( key == "roundCorners" || key == "useSourceLayers"
+                         || key == "useSourceWidths" || key == "deleteSourceItems" )
+                {
+                    ok = it->is_boolean();
+
+                    if( ok )
+                    {
+                        std::optional<bool>& slot = key == "roundCorners"      ? roundCorners
+                                                    : key == "useSourceLayers" ? useSourceLayers
+                                                    : key == "useSourceWidths" ? useSourceWidths
+                                                                               : deleteSources;
+                        slot = it->get<bool>();
+                    }
+                }
+                else
+                {
+                    ok = false;
+                }
+
+                if( !ok )
+                {
+                    aField = key;
+                    return false;
+                }
+            }
+
+            // KiCad's one refusal, made before anything is written so no message box is raised:
+            // its own sentence becomes the refusal's message.
+            if( ( lineWidth ? *lineWidth : m_dialog->m_lineWidth.GetIntValue() ) <= 0 )
+            {
+                aField = "lineWidth";
+                CcPromptCaptureMessage(
+                        _( "Line width must be a positive value." ).ToStdString( wxConvUTF8 ) );
+                return false;
+            }
+
+            wxCommandEvent dummy;
+
+            if( outset )
+                m_dialog->m_outset.SetValue( *outset );
+
+            if( lineWidth )
+                m_dialog->m_lineWidth.SetValue( *lineWidth );
+
+            if( layer )
+                m_dialog->m_LayerSelectionCtrl->SetLayerSelection( *layer );
+
+            if( roundCorners )
+                m_dialog->m_roundCorners->SetValue( *roundCorners );
+
+            if( useSourceLayers )
+            {
+                m_dialog->m_copyLayers->SetValue( *useSourceLayers );
+                m_dialog->OnCopyLayersChecked( dummy );
+            }
+
+            if( useSourceWidths )
+                m_dialog->m_copyWidths->SetValue( *useSourceWidths );
+
+            if( gridGiven )
+            {
+                m_dialog->m_roundToGrid->SetValue( grid.has_value() );
+
+                if( grid )
+                    m_dialog->m_roundingGrid.SetValue( *grid );
+
+                m_dialog->OnRoundToGridChecked( dummy );
+            }
+
+            if( deleteSources )
+                m_dialog->m_deleteSourceItems->SetValue( *deleteSources );
+
+            if( !m_dialog->Validate() || !m_dialog->TransferDataFromWindow() )
+            {
+                aField = "lineWidth";
+                return false;
+            }
+
+            m_dialog->SaveControlState();
+            return true;
+        }
+
+    private:
+        DIALOG_OUTSET_ITEMS* m_dialog;
+    };
+
+    RECEIVER receiver( this );
+
+    switch( CcHostPromptModal( "outset", record, receiver ) )
+    {
+    case 1:  SetReturnCode( wxID_OK );     return wxID_OK;
+    case 0:  SetReturnCode( wxID_CANCEL ); return wxID_CANCEL;
+    default: return DIALOG_OUTSET_ITEMS_BASE::ShowModal();
+    }
+}
+
+#endif // __EMSCRIPTEN__

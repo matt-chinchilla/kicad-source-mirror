@@ -19,6 +19,10 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: under __EMSCRIPTEN__ ShowModal asks the host
+ * (host_prompt.h, ask findFootprint, modal) and writes its answer into the dialog's own search
+ * field; a plain build is unchanged.
  */
 
 #include "dialog_get_footprint_by_name.h"
@@ -83,3 +87,88 @@ void DIALOG_GET_FOOTPRINT_BY_NAME::OnSearchInputChanged( wxCommandEvent& event )
     }
     m_choiceFpList->SetSelection( -1 );
 }
+
+
+#ifdef __EMSCRIPTEN__
+
+// The host prompt (host_prompt.h, ask "findFootprint", modal), Get and Move Footprint. The record
+// { references } is the list the dialog offers, the reference of each entry in its order; the
+// answer { reference } is written into the dialog's own search field (its list selection
+// follows, as typing does) and the caller finds the footprint and moves it, as on OK. A
+// reference the list does not hold is refused, so the card stays open.
+
+int DIALOG_GET_FOOTPRINT_BY_NAME::ShowModal()
+{
+    LoadControlState();
+    TransferDataToWindow();
+
+    nlohmann::json references = nlohmann::json::array();
+
+    for( unsigned ii = 0; ii < m_choiceFpList->GetCount(); ++ii )
+        references.push_back( GetFootprintName( m_choiceFpList->GetString( ii ) )
+                                      .ToStdString( wxConvUTF8 ) );
+
+    nlohmann::json record;
+    record["references"] = references;
+
+    class RECEIVER : public CC_PROMPT_RECEIVER
+    {
+    public:
+        explicit RECEIVER( DIALOG_GET_FOOTPRINT_BY_NAME* aDialog ) : m_dialog( aDialog ) {}
+
+        bool CcApply( const nlohmann::json& aAnswer, std::string& aField ) override
+        {
+            if( !aAnswer.is_object() )
+                return false;
+
+            for( auto it = aAnswer.begin(); it != aAnswer.end(); ++it )
+            {
+                if( it.key() != "reference" )
+                {
+                    aField = it.key();
+                    return false;
+                }
+            }
+
+            aField = "reference";
+
+            if( !aAnswer.contains( "reference" ) || !aAnswer["reference"].is_string() )
+                return false;
+
+            wxString reference = wxString::FromUTF8( aAnswer["reference"].get<std::string>() );
+            reference.Trim( true ).Trim( false );
+
+            if( reference.IsEmpty() )
+                return false;
+
+            bool held = false;
+
+            for( unsigned ii = 0; ii < m_dialog->m_choiceFpList->GetCount() && !held; ++ii )
+            {
+                held = GetFootprintName( m_dialog->m_choiceFpList->GetString( ii ) )
+                               .IsSameAs( reference, false );
+            }
+
+            if( !held )
+                return false;
+
+            m_dialog->m_SearchTextCtrl->SetValue( reference );
+            aField.clear();
+            return m_dialog->Validate() && m_dialog->TransferDataFromWindow();
+        }
+
+    private:
+        DIALOG_GET_FOOTPRINT_BY_NAME* m_dialog;
+    };
+
+    RECEIVER receiver( this );
+
+    switch( CcHostPromptModal( "findFootprint", record, receiver ) )
+    {
+    case 1:  SetReturnCode( wxID_OK );     return wxID_OK;
+    case 0:  SetReturnCode( wxID_CANCEL ); return wxID_CANCEL;
+    default: return DIALOG_GET_FOOTPRINT_BY_NAME_BASE::ShowModal();
+    }
+}
+
+#endif // __EMSCRIPTEN__

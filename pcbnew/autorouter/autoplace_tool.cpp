@@ -19,6 +19,10 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: under __EMSCRIPTEN__ the auto-placer runs with no
+ * progress reporter (KiCad's "Autoplace Footprints" progress window never shows; the in-browser
+ * editor's page shows its own working state); a plain build is unchanged.
  */
 
 
@@ -98,8 +102,14 @@ int AUTOPLACE_TOOL::autoplace( std::vector<FOOTPRINT*>& aFootprints )
     std::function<int( FOOTPRINT* aFootprint )> callback = refreshCallback;
     autoplacer.SetRefreshCallback( callback );
 
+#ifdef __EMSCRIPTEN__
+    // No progress window in the browser: the autoplacer runs with no reporter (it checks for
+    // one before every report), and the page shows its own working state meanwhile.
+    autoplacer.SetProgressReporter( nullptr );
+#else
     WX_PROGRESS_REPORTER progressReporter( frame(), _( "Autoplace Footprints" ), 1, PR_CAN_ABORT );
     autoplacer.SetProgressReporter( &progressReporter );
+#endif
 
     auto result = autoplacer.AutoplaceFootprints( aFootprints, &commit, false );
 

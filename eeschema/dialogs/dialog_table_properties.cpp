@@ -19,6 +19,10 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: DIALOG_TABLE_PROPERTIES asks the in-browser
+ * editor's host to answer it (host_prompt.h, ask table) before KiCad's own dialog shows
+ * (WebAssembly build only).
  */
 
 #include <kiplatform/ui.h>
@@ -34,6 +38,207 @@
 #include <sch_commit.h>
 #include <tool/tool_manager.h>
 #include <dialog_table_properties.h>
+
+#ifdef __EMSCRIPTEN__
+#include <cmath>
+#include <limits>
+#include <host_prompt.h>
+
+
+/// A color as the in-browser editor's records carry it: "#rrggbbaa", "" when unspecified.
+[[maybe_unused]] static std::string ccTableColor( const KIGFX::COLOR4D& aColor )
+{
+    if( aColor == KIGFX::COLOR4D::UNSPECIFIED )
+        return std::string();
+
+    return aColor.ToHexString().Lower().ToStdString( wxConvUTF8 );
+}
+
+
+/// "" is unspecified, "#rrggbb" or "#rrggbbaa" a color; anything else is refused.
+[[maybe_unused]] static bool ccTableColorOf( const nlohmann::json& aValue, KIGFX::COLOR4D& aColor )
+{
+    if( !aValue.is_string() )
+        return false;
+
+    const std::string text = aValue.get<std::string>();
+
+    if( text.empty() )
+    {
+        aColor = KIGFX::COLOR4D::UNSPECIFIED;
+        return true;
+    }
+
+    KIGFX::COLOR4D color;
+
+    if( ( text.size() != 7 && text.size() != 9 )
+        || !color.SetFromHexString( wxString::FromUTF8( text ) ) )
+    {
+        return false;
+    }
+
+    aColor = color;
+    return true;
+}
+
+
+[[maybe_unused]] static const char* const CC_TABLE_STYLES[] = { "solid", "dash", "dot", "dashdot", "dashdotdot" };
+
+
+/// The name of the line style a style combo's selection stands for (lineTypeNames' order).
+[[maybe_unused]] static std::string ccTableStyle( int aSelection )
+{
+    if( aSelection < 0 || aSelection >= (int) lineTypeNames.size() )
+        aSelection = 0;
+
+    auto it = lineTypeNames.begin();
+    std::advance( it, aSelection );
+
+    const int style = static_cast<int>( it->first );
+
+    return ( style >= 0 && style < 5 ) ? CC_TABLE_STYLES[style] : CC_TABLE_STYLES[0];
+}
+
+
+/// The style combo's selection for a style name, -1 when the name is not one.
+[[maybe_unused]] static int ccTableStyleSelection( const nlohmann::json& aValue )
+{
+    if( !aValue.is_string() )
+        return -1;
+
+    const std::string name = aValue.get<std::string>();
+
+    for( int ii = 0; ii < 5; ++ii )
+    {
+        if( name != CC_TABLE_STYLES[ii] )
+            continue;
+
+        auto it = lineTypeNames.find( static_cast<LINE_STYLE>( ii ) );
+
+        return it == lineTypeNames.end() ? -1
+                                         : (int) std::distance( lineTypeNames.begin(), it );
+    }
+
+    return -1;
+}
+
+
+/// A length in millimeters to internal units, refused when not a finite number in range.
+[[maybe_unused]] static bool ccTableLength( const nlohmann::json& aValue, const EDA_IU_SCALE& aScale,
+                           long long& aIU )
+{
+    if( !aValue.is_number() )
+        return false;
+
+    const double mm = aValue.get<double>();
+
+    if( !std::isfinite( mm ) )
+        return false;
+
+    const double iu = std::round( mm * aScale.IU_PER_MM );
+
+    if( std::fabs( iu ) > (double) std::numeric_limits<int>::max() )
+        return false;
+
+    aIU = static_cast<long long>( iu );
+    return true;
+}
+
+/// One stroke group of the table answer (border or separators), read whole before anything
+/// is written; a member left at its default keeps the dialog's value.
+struct CC_TABLE_STROKE_IN
+{
+    int            first = -1;      ///< the first switch (external or rows), -1 kept
+    int            second = -1;     ///< the second switch (header or cols), -1 kept
+    bool           hasWidth = false;
+    long long      width = 0;
+    bool           hasColor = false;
+    KIGFX::COLOR4D color;
+    int            style = -1;      ///< a style combo selection, -1 kept
+};
+
+
+[[maybe_unused]] static bool ccTableStrokeIn( const nlohmann::json& aAnswer, const char* aKey,
+                                              const char* aFirst, const char* aSecond,
+                                              bool aColors, const EDA_IU_SCALE& aScale,
+                                              CC_TABLE_STROKE_IN& aIn, std::string& aField )
+{
+    if( !aAnswer.contains( aKey ) )
+        return true;
+
+    const nlohmann::json& value = aAnswer[aKey];
+
+    aField = aKey;
+
+    if( !value.is_object() )
+        return false;
+
+    auto at = [&]( const char* aName )
+    {
+        aField = std::string( aKey ) + "." + aName;
+    };
+
+    if( value.contains( aFirst ) )
+    {
+        at( aFirst );
+
+        if( !value[aFirst].is_boolean() )
+            return false;
+
+        aIn.first = value[aFirst].get<bool>() ? 1 : 0;
+    }
+
+    if( value.contains( aSecond ) )
+    {
+        at( aSecond );
+
+        if( !value[aSecond].is_boolean() )
+            return false;
+
+        aIn.second = value[aSecond].get<bool>() ? 1 : 0;
+    }
+
+    if( value.contains( "width" ) && !value["width"].is_null() )
+    {
+        at( "width" );
+
+        if( !ccTableLength( value["width"], aScale, aIn.width ) || aIn.width < 0 )
+            return false;
+
+        aIn.hasWidth = true;
+    }
+
+    if( value.contains( "color" ) )
+    {
+        at( "color" );
+
+        if( aColors )
+        {
+            if( !ccTableColorOf( value["color"], aIn.color ) )
+                return false;
+
+            aIn.hasColor = true;
+        }
+        else if( !value["color"].is_string() || !value["color"].get<std::string>().empty() )
+        {
+            // The board's table has no stroke colors: only the record's "" is taken.
+            return false;
+        }
+    }
+
+    if( value.contains( "style" ) )
+    {
+        at( "style" );
+        aIn.style = ccTableStyleSelection( value["style"] );
+
+        if( aIn.style < 0 )
+            return false;
+    }
+
+    aField.clear();
+    return true;
+}
+#endif // __EMSCRIPTEN__
 
 
 DIALOG_TABLE_PROPERTIES::DIALOG_TABLE_PROPERTIES( SCH_EDIT_FRAME* aFrame, SCH_TABLE* aTable ) :
@@ -425,3 +630,229 @@ void DIALOG_TABLE_PROPERTIES::onSize( wxSizeEvent& aEvent )
     aEvent.Skip();
 }
 
+
+#ifdef __EMSCRIPTEN__
+int DIALOG_TABLE_PROPERTIES::ShowModal()
+{
+    switch( ccAskHost() )
+    {
+    case 1:  SetReturnCode( wxID_OK );     return wxID_OK;
+    case 0:  SetReturnCode( wxID_CANCEL ); return wxID_CANCEL;
+    default: return DIALOG_TABLE_PROPERTIES_BASE::ShowModal();
+    }
+}
+
+
+int DIALOG_TABLE_PROPERTIES::ShowQuasiModal()
+{
+    switch( ccAskHost() )
+    {
+    case 1:  SetReturnCode( wxID_OK );     return wxID_OK;
+    case 0:  SetReturnCode( wxID_CANCEL ); return wxID_CANCEL;
+    default: return DIALOG_TABLE_PROPERTIES_BASE::ShowQuasiModal();
+    }
+}
+
+
+int DIALOG_TABLE_PROPERTIES::ccAskHost()
+{
+    if( !TransferDataToWindow() )
+        return -1;
+
+    const EDA_IU_SCALE& scale = m_frame->GetIuScale();
+    const int           rows = m_table->GetRowCount();
+    const int           cols = m_table->GetColCount();
+
+    auto covered = [this]( int aRow, int aCol )
+    {
+        const SCH_TABLECELL* cell = m_table->GetCell( aRow, aCol );
+        return cell->GetColSpan() == 0 || cell->GetRowSpan() == 0;
+    };
+
+    auto widthOf = [&]( const STROKE_PARAMS& aStroke ) -> nlohmann::json
+    {
+        if( aStroke.GetWidth() < 0 )
+            return nullptr;
+
+        return scale.IUTomm( aStroke.GetWidth() );
+    };
+
+    // The grid as TransferDataToWindow filled it, row by row; a covered cell is null.
+    nlohmann::json cells = nlohmann::json::array();
+
+    for( int row = 0; row < rows; ++row )
+    {
+        nlohmann::json line = nlohmann::json::array();
+
+        for( int col = 0; col < cols; ++col )
+        {
+            if( covered( row, col ) )
+                line.push_back( nullptr );
+            else
+                line.push_back( m_grid->GetCellValue( row, col ).ToStdString( wxConvUTF8 ) );
+        }
+
+        cells.push_back( line );
+    }
+
+    nlohmann::json record;
+    record["uuid"] = m_table->m_Uuid.AsStdString();
+    record["rows"] = rows;
+    record["cols"] = cols;
+    record["cells"] = cells;
+    record["border"] = { { "external", m_borderCheckbox->GetValue() },
+                         { "header", m_headerBorder->GetValue() },
+                         { "width", widthOf( m_table->GetBorderStroke() ) },
+                         { "color", ccTableColor( m_borderColorSwatch->GetSwatchColor() ) },
+                         { "style", ccTableStyle( m_borderStyleCombo->GetSelection() ) } };
+    record["separators"] = { { "rows", m_rowSeparators->GetValue() },
+                             { "cols", m_colSeparators->GetValue() },
+                             { "width", widthOf( m_table->GetSeparatorsStroke() ) },
+                             { "color", ccTableColor( m_separatorsColorSwatch->GetSwatchColor() ) },
+                             { "style", ccTableStyle( m_separatorsStyleCombo->GetSelection() ) } };
+    record["layer"] = "";
+    record["locked"] = false;
+
+    class RECEIVER : public CC_PROMPT_RECEIVER
+    {
+    public:
+        RECEIVER( DIALOG_TABLE_PROPERTIES* aDialog, const EDA_IU_SCALE& aScale ) :
+                m_dialog( aDialog ),
+                m_scale( aScale )
+        {
+        }
+
+        bool CcApply( const nlohmann::json& aAnswer, std::string& aField ) override
+        {
+            DIALOG_TABLE_PROPERTIES* dlg = m_dialog;
+            SCH_TABLE*               table = dlg->m_table;
+            const int                rows = table->GetRowCount();
+            const int                cols = table->GetColCount();
+
+            aField.clear();
+
+            if( !aAnswer.is_object() )
+                return false;
+
+            // Read the whole answer before anything is written.
+            const nlohmann::json* cellsIn = nullptr;
+
+            if( aAnswer.contains( "cells" ) )
+            {
+                aField = "cells";
+                cellsIn = &aAnswer["cells"];
+
+                if( !cellsIn->is_array() || (int) cellsIn->size() != rows )
+                    return false;
+
+                for( const nlohmann::json& line : *cellsIn )
+                {
+                    if( !line.is_array() || (int) line.size() != cols )
+                        return false;
+
+                    for( const nlohmann::json& text : line )
+                    {
+                        if( !text.is_string() && !text.is_null() )
+                            return false;
+                    }
+                }
+
+                aField.clear();
+            }
+
+            CC_TABLE_STROKE_IN border;
+            CC_TABLE_STROKE_IN separators;
+
+            if( !ccTableStrokeIn( aAnswer, "border", "external", "header", true, m_scale, border,
+                                  aField )
+                || !ccTableStrokeIn( aAnswer, "separators", "rows", "cols", true, m_scale,
+                                     separators, aField ) )
+            {
+                return false;
+            }
+
+            // A schematic table has no layer and no lock: the record's "" and false are taken.
+            if( aAnswer.contains( "layer" )
+                && ( !aAnswer["layer"].is_string()
+                     || !aAnswer["layer"].get<std::string>().empty() ) )
+            {
+                aField = "layer";
+                return false;
+            }
+
+            if( aAnswer.contains( "locked" )
+                && ( !aAnswer["locked"].is_boolean() || aAnswer["locked"].get<bool>() ) )
+            {
+                aField = "locked";
+                return false;
+            }
+
+            // Write into the dialog's own controls (a cell editor the dialog opened is closed
+            // first so it cannot write its text back over the answer).
+            dlg->m_grid->CommitPendingChanges( true );
+
+            if( cellsIn )
+            {
+                for( int row = 0; row < rows; ++row )
+                {
+                    for( int col = 0; col < cols; ++col )
+                    {
+                        const nlohmann::json& text = ( *cellsIn )[row][col];
+                        const SCH_TABLECELL*  cell = table->GetCell( row, col );
+
+                        if( text.is_null() || cell->GetColSpan() == 0 || cell->GetRowSpan() == 0 )
+                            continue;
+
+                        dlg->m_grid->SetCellValue( row, col,
+                                                   wxString::FromUTF8( text.get<std::string>() ) );
+                    }
+                }
+            }
+
+            if( border.first >= 0 )
+                dlg->m_borderCheckbox->SetValue( border.first == 1 );
+
+            if( border.second >= 0 )
+                dlg->m_headerBorder->SetValue( border.second == 1 );
+
+            if( separators.first >= 0 )
+                dlg->m_rowSeparators->SetValue( separators.first == 1 );
+
+            if( separators.second >= 0 )
+                dlg->m_colSeparators->SetValue( separators.second == 1 );
+
+            // The dialog's own handler: a stroke switched on with no width takes the default.
+            wxCommandEvent dummy;
+            dlg->onBorderChecked( dummy );
+
+            if( border.hasWidth )
+                dlg->m_borderWidth.SetValue( border.width );
+
+            if( border.hasColor )
+                dlg->m_borderColorSwatch->SetSwatchColor( border.color, false );
+
+            if( border.style >= 0 )
+                dlg->m_borderStyleCombo->SetSelection( border.style );
+
+            if( separators.hasWidth )
+                dlg->m_separatorsWidth.SetValue( separators.width );
+
+            if( separators.hasColor )
+                dlg->m_separatorsColorSwatch->SetSwatchColor( separators.color, false );
+
+            if( separators.style >= 0 )
+                dlg->m_separatorsStyleCombo->SetSelection( separators.style );
+
+            return dlg->TransferDataFromWindow();
+        }
+
+    private:
+        DIALOG_TABLE_PROPERTIES* m_dialog;
+        const EDA_IU_SCALE&      m_scale;
+    };
+
+    RECEIVER receiver( this, scale );
+
+    return CcHostPromptModal( "table", record, receiver );
+}
+#endif // __EMSCRIPTEN__

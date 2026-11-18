@@ -19,6 +19,10 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: the footprint and inductor actions take the
+ * host's armed values (cc_microwave_arm.h) once, in place of their dialogs, and an armed run
+ * places one item and ends; a plain build is unchanged.
  */
 
 #include <bitmaps.h>
@@ -36,6 +40,23 @@
 #include <tools/pcb_selection.h>
 #include <view/view_controls.h>
 #include <view/view.h>
+
+#ifdef __EMSCRIPTEN__
+#include <microwave/cc_microwave_arm.h>
+
+/// The armed shape of a footprint microwave action (cc_microwave_arm.h).
+static CC_MICROWAVE_SHAPE ccArmShapeOf( MICROWAVE_FOOTPRINT_SHAPE aShape )
+{
+    switch( aShape )
+    {
+    case MICROWAVE_FOOTPRINT_SHAPE::GAP:            return CC_MICROWAVE_SHAPE::GAP;
+    case MICROWAVE_FOOTPRINT_SHAPE::STUB:           return CC_MICROWAVE_SHAPE::STUB;
+    case MICROWAVE_FOOTPRINT_SHAPE::STUB_ARC:       return CC_MICROWAVE_SHAPE::ARC_STUB;
+    case MICROWAVE_FOOTPRINT_SHAPE::FUNCTION_SHAPE: return CC_MICROWAVE_SHAPE::POLYGON;
+    default:                                        return CC_MICROWAVE_SHAPE::NONE;
+    }
+}
+#endif
 
 
 MICROWAVE_TOOL::MICROWAVE_TOOL() :
@@ -83,6 +104,23 @@ int MICROWAVE_TOOL::addMicrowaveFootprint( const TOOL_EVENT& aEvent )
             };
         }
 
+#ifdef __EMSCRIPTEN__
+        // An armed run (cc_microwave_arm.h) places one item, then ends as on Esc, so its
+        // values never reach a second placement.
+        bool PlaceItem( BOARD_ITEM* aItem, BOARD_COMMIT& aCommit ) override
+        {
+            if( !INTERACTIVE_PLACER_BASE::PlaceItem( aItem, aCommit ) )
+                return false;
+
+            if( m_armedRun > 0 )
+                m_tool->GetManager()->PostAction( ACTIONS::cancelInteractive );
+
+            return true;
+        }
+
+        int m_armedRun = 0;
+#endif
+
     private:
         MICROWAVE_TOOL*           m_tool;
         MICROWAVE_FOOTPRINT_SHAPE m_itemType;
@@ -90,8 +128,17 @@ int MICROWAVE_TOOL::addMicrowaveFootprint( const TOOL_EVENT& aEvent )
 
     MICROWAVE_PLACER placer( this, aEvent.Parameter<MICROWAVE_FOOTPRINT_SHAPE>() );
 
+#ifdef __EMSCRIPTEN__
+    placer.m_armedRun =
+            cc_microwave::Begin( ccArmShapeOf( aEvent.Parameter<MICROWAVE_FOOTPRINT_SHAPE>() ) );
+#endif
+
     doInteractiveItemPlacement( aEvent, &placer, _( "Place microwave feature" ),
                                 IPO_REPEAT | IPO_ROTATE | IPO_FLIP );
+
+#ifdef __EMSCRIPTEN__
+    cc_microwave::End( placer.m_armedRun );
+#endif
 
     return 0;
 }
@@ -115,6 +162,12 @@ int MICROWAVE_TOOL::drawMicrowaveInductor( const TOOL_EVENT& aEvent )
     PCB_EDIT_FRAME&       frame = *getEditFrame<PCB_EDIT_FRAME>();
 
     frame.PushTool( aEvent );
+
+#ifdef __EMSCRIPTEN__
+    // An armed run (cc_microwave_arm.h): createInductorBetween reads the armed length in
+    // place of its dialogs; one inductor, then the tool ends.
+    const int armedRun = cc_microwave::Begin( CC_MICROWAVE_SHAPE::LINE );
+#endif
 
     auto setCursor =
             [&]()
@@ -205,6 +258,14 @@ int MICROWAVE_TOOL::drawMicrowaveInductor( const TOOL_EVENT& aEvent )
 
             view.SetVisible( &previewRect, false );
             view.Update( &previewRect, KIGFX::GEOMETRY );
+
+#ifdef __EMSCRIPTEN__
+            if( armedRun > 0 )
+            {
+                frame.PopTool( aEvent );
+                break;
+            }
+#endif
         }
         // any move or drag once the origin was set updates
         // the end point
@@ -227,6 +288,10 @@ int MICROWAVE_TOOL::drawMicrowaveInductor( const TOOL_EVENT& aEvent )
     }
 
     view.Remove( &previewRect );
+
+#ifdef __EMSCRIPTEN__
+    cc_microwave::End( armedRun );
+#endif
 
     frame.GetCanvas()->SetCurrentCursor( KICURSOR::ARROW );
     controls.CaptureCursor( false );
