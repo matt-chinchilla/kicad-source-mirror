@@ -3,6 +3,8 @@
  *
  * Copyright (C) 2019 Alexander Shuklin <Jasuramme@gmail.com>
  * Copyright The KiCad Developers, see AUTHORS.txt for contributors.
+ * Modified by Circuit Center Inc on 2026-11-18: CcProcessNetNames, the net name pass over pads
+ * the in-browser host hands in, with its outcome per pin (under __EMSCRIPTEN__).
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -1433,6 +1435,10 @@ void BACK_ANNOTATE::processNetNameChange( SCH_COMMIT* aCommit, const wxString& a
             static_cast<SCH_LABEL_BASE*>( driver )->SetText( aNewName );
         }
 
+#ifdef __EMSCRIPTEN__
+        m_ccLastLabel = driver->m_Uuid;
+        m_ccLastOutcome = wxS( "rename" );
+#endif
         m_reporter.ReportHead( msg, RPT_SEVERITY_ACTION );
         break;
 
@@ -1443,6 +1449,9 @@ void BACK_ANNOTATE::processNetNameChange( SCH_COMMIT* aCommit, const wxString& a
                         EscapeHTML( aOldName ),
                         EscapeHTML( aNewName ) );
 
+#ifdef __EMSCRIPTEN__
+            m_ccLastOutcome = wxS( "refused" );
+#endif
             m_reporter.ReportHead( msg, RPT_SEVERITY_ERROR );
             break;
         }
@@ -1479,6 +1488,11 @@ void BACK_ANNOTATE::processNetNameChange( SCH_COMMIT* aCommit, const wxString& a
                     }
                 }
 
+#ifdef __EMSCRIPTEN__
+                m_ccLastLabel = resolvedDriver->Type() == SCH_PIN_T ? niluuid : resolvedDriver->m_Uuid;
+                m_ccLastOutcome = wxS( "rename" );
+#endif
+
                 m_reporter.ReportHead( msg, RPT_SEVERITY_ACTION );
                 break;
             }
@@ -1503,6 +1517,10 @@ void BACK_ANNOTATE::processNetNameChange( SCH_COMMIT* aCommit, const wxString& a
             aCommit->Add( label, screen );
         }
 
+#ifdef __EMSCRIPTEN__
+        m_ccLastOutcome = wxS( "add" );
+#endif
+
         m_reporter.ReportHead( msg, RPT_SEVERITY_ACTION );
         break;
 
@@ -1510,3 +1528,62 @@ void BACK_ANNOTATE::processNetNameChange( SCH_COMMIT* aCommit, const wxString& a
         break;
     }
 }
+
+
+#ifdef __EMSCRIPTEN__
+std::vector<BACK_ANNOTATE::CC_NET_ROW>
+BACK_ANNOTATE::CcProcessNetNames( SCH_COMMIT* aCommit, const std::vector<CC_PAD_NET>& aPads )
+{
+    std::vector<CC_NET_ROW> rows;
+    SCH_SHEET_LIST          sheets = m_frame->Schematic().Hierarchy();
+
+    m_changesCount = 0;
+    m_refs.Clear();
+    sheets.GetSymbols( m_refs, SYMBOL_FILTER_NON_POWER );
+
+    std::map<wxString, std::vector<size_t>> byRef;
+
+    for( size_t i = 0; i < m_refs.GetCount(); ++i )
+        byRef[m_refs[i].GetRef()].push_back( i );
+
+    for( const CC_PAD_NET& pad : aPads )
+    {
+        auto it = byRef.find( pad.ref );
+
+        if( it == byRef.end() )
+            continue;
+
+        for( size_t index : it->second )
+        {
+            SCH_REFERENCE&  ref = m_refs[index];
+            SCH_SYMBOL*     symbol = ref.GetSymbol();
+            SCH_PIN*        pin = symbol ? symbol->GetPin( pad.pad ) : nullptr;
+            SCH_CONNECTION* connection = pin ? pin->Connection( &ref.GetSheetPath() ) : nullptr;
+
+            if( !connection )
+                continue;
+
+            const wxString from = connection->Name( true );
+
+            if( from != pad.net )
+            {
+                m_ccLastLabel = niluuid;
+                m_ccLastOutcome = wxEmptyString;
+
+                processNetNameChange( aCommit, ref.GetRef(), pin, connection, from, pad.net );
+
+                if( !m_ccLastOutcome.IsEmpty() )
+                {
+                    rows.push_back( { ref.GetRef(), pin->GetShownNumber(), from, pad.net,
+                                      ref.GetSheetPath().PathAsString(), m_ccLastLabel,
+                                      m_ccLastOutcome } );
+                }
+            }
+
+            break;
+        }
+    }
+
+    return rows;
+}
+#endif
