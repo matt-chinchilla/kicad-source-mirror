@@ -23,9 +23,10 @@
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
  *
- * Modified by Circuit Center Inc on 2026-11-18: K-REMAP, a KiCad 5 project opened and saved
+ * Modified by Circuit Center Inc on 2026-11-18: K-REMAP and K-MIGRATE. K-REMAP, a KiCad 5 project opened and saved
  * by the WebAssembly host (CcLegacyHostBegin) remaps and rescues with no window, every
- * message a line on the host's reporter.
+ * message a line on the host's reporter; K-MIGRATE, DIALOG_MIGRATE_BUSES is never shown in the
+ * WebAssembly build (the labels stay as the file holds them until the host names the buses).
  */
 
 
@@ -891,12 +892,18 @@ bool SCH_EDIT_FRAME::OpenProjectFiles( const std::vector<wxString>& aFileSet, in
 
         // Migrate conflicting bus definitions
         // TODO(JE) This should only run once based on schematic file version
+#ifdef __EMSCRIPTEN__
+        // K-MIGRATE: no window. KiCad joins the labels only by the dialog's answer; here the
+        // host reads the buses (kicadBusMigrationGet) and names them in one commit
+        // (kicadBusMigrationApply) when the reader chooses. Until then the file stands as is.
+#else
         if( Schematic().ConnectionGraph()->GetBusesNeedingMigration().size() > 0 )
         {
             DIALOG_MIGRATE_BUSES dlg( this );
             dlg.ShowQuasiModal();
             OnModify();
         }
+#endif
 
         SCH_COMMIT dummy( this );
 
