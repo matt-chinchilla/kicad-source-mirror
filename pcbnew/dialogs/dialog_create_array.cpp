@@ -19,6 +19,11 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: under __EMSCRIPTEN__ the dialog asks the host
+ * (host_prompt.h, ask array, modeless) before it shows, takes the answer into its own controls
+ * and runs its own TransferDataFromWindow, its own center pickers and its own cancel, and a
+ * refusal's sentence is captured in place of wxMessageBox; a plain build is unchanged.
  */
 
 #include "dialogs/dialog_create_array.h"
@@ -33,6 +38,12 @@
 #include <tools/pcb_picker_tool.h>
 #include <tool/tool_manager.h>
 #include <widgets/text_ctrl_eval.h>
+
+#ifdef __EMSCRIPTEN__
+#include <cmath>
+#include <initializer_list>
+#include <optional>
+#endif
 
 
 /**
@@ -235,6 +246,10 @@ DIALOG_CREATE_ARRAY::DIALOG_CREATE_ARRAY( PCB_BASE_FRAME*                 aParen
 
 DIALOG_CREATE_ARRAY::~DIALOG_CREATE_ARRAY()
 {
+#ifdef __EMSCRIPTEN__
+    // A prompt still parked on this dialog ends ("gone").
+    CcHostPromptForget( this );
+#endif
 }
 
 
@@ -328,6 +343,12 @@ void DIALOG_CREATE_ARRAY::UpdatePickedItem( const EDA_ITEM* aItem )
     }
 
     Enable( true );
+
+#ifdef __EMSCRIPTEN__
+    // The host's pick ended: its card shows the new centre.
+    if( m_ccToken )
+        CcHostPromptUpdate( m_ccToken, ccRecord() );
+#endif
 }
 
 
@@ -340,6 +361,12 @@ void DIALOG_CREATE_ARRAY::UpdatePickedPoint( const std::optional<VECTOR2I>& aPoi
     }
 
     Enable( true );
+
+#ifdef __EMSCRIPTEN__
+    // The host's pick ended: its card shows the new centre.
+    if( m_ccToken )
+        CcHostPromptUpdate( m_ccToken, ccRecord() );
+#endif
 }
 
 
@@ -584,6 +611,12 @@ bool DIALOG_CREATE_ARRAY::TransferDataFromWindow()
         else
             errorStr = wxJoin( errors, '\n' );
 
+#ifdef __EMSCRIPTEN__
+        // While the host's answer is applied, KiCad's sentence is the refusal's message.
+        if( CcPromptCapturing() )
+            CcPromptCaptureMessage( errorStr.ToStdString( wxConvUTF8 ) );
+        else
+#endif
         wxMessageBox( errorStr );
         ret = false;
     }
@@ -695,3 +728,541 @@ void DIALOG_CREATE_ARRAY::calculateCircularArrayProperties()
         }
     }
 }
+
+
+#ifdef __EMSCRIPTEN__
+
+// The host prompt (host_prompt.h, ask "array", modeless): the record is what the controls hold
+// (lengths in millimeters, angles in degrees), the answer is written into the same controls and
+// KiCad's own TransferDataFromWindow decides, then closes the dialog so ARRAY_TOOL makes the
+// array as for its own OK button.
+
+namespace
+{
+
+/// A refused answer names its key.
+bool ccRefuse( std::string& aField, const char* aKey )
+{
+    aField = aKey;
+    return false;
+}
+
+
+const char* ccNumberingName( ARRAY_AXIS::NUMBERING_TYPE aType )
+{
+    switch( aType )
+    {
+    case ARRAY_AXIS::NUMBERING_TYPE::NUMBERING_NUMERIC:         return "numeric";
+    case ARRAY_AXIS::NUMBERING_TYPE::NUMBERING_HEX:             return "hex";
+    case ARRAY_AXIS::NUMBERING_TYPE::NUMBERING_ALPHA_NO_IOSQXZ: return "alphaShort";
+    case ARRAY_AXIS::NUMBERING_TYPE::NUMBERING_ALPHA_FULL:      return "alphaFull";
+    }
+
+    return "numeric";
+}
+
+
+long ccLongOf( const wxTextCtrl& aCtrl, long aDefault )
+{
+    long value = aDefault;
+
+    if( !aCtrl.GetValue().ToLong( &value ) )
+        return aDefault;
+
+    return value;
+}
+
+
+nlohmann::json ccAxisRecord( const wxChoice& aType, const wxTextCtrl& aStart,
+                             const wxTextCtrl& aStep )
+{
+    const int sel = aType.GetSelection();
+    const ARRAY_AXIS::NUMBERING_TYPE type =
+            ( sel >= 0 && sel < static_cast<int>( numberingTypeData.size() ) )
+                    ? numberingTypeData[sel].m_numbering_type
+                    : ARRAY_AXIS::NUMBERING_TYPE::NUMBERING_NUMERIC;
+
+    return nlohmann::json{ { "type", ccNumberingName( type ) },
+                           { "start", aStart.GetValue().ToStdString( wxConvUTF8 ) },
+                           { "step", ccLongOf( aStep, 1 ) } };
+}
+
+
+// Bounds of an answer: a length within the board's integer range, an angle of at most ten
+// turns, a count or step that fits KiCad's long.
+constexpr double CC_MAX_MM = 2000.0;
+constexpr double CC_MAX_DEG = 3600.0;
+constexpr long   CC_MAX_COUNT = 1000000;
+
+
+bool ccReadBool( const nlohmann::json& aObj, const char* aKey, std::optional<bool>& aOut )
+{
+    auto it = aObj.find( aKey );
+
+    if( it == aObj.end() )
+        return true;
+
+    if( !it->is_boolean() )
+        return false;
+
+    aOut = it->get<bool>();
+    return true;
+}
+
+
+bool ccReadLong( const nlohmann::json& aObj, const char* aKey, std::optional<long>& aOut )
+{
+    auto it = aObj.find( aKey );
+
+    if( it == aObj.end() )
+        return true;
+
+    if( !it->is_number_integer() )
+        return false;
+
+    const long long v = it->get<long long>();
+
+    if( v < -CC_MAX_COUNT || v > CC_MAX_COUNT )
+        return false;
+
+    aOut = static_cast<long>( v );
+    return true;
+}
+
+
+bool ccReadNumber( const nlohmann::json& aObj, const char* aKey, double aMax,
+                   std::optional<double>& aOut )
+{
+    auto it = aObj.find( aKey );
+
+    if( it == aObj.end() )
+        return true;
+
+    if( !it->is_number() )
+        return false;
+
+    const double v = it->get<double>();
+
+    if( !std::isfinite( v ) || v < -aMax || v > aMax )
+        return false;
+
+    aOut = v;
+    return true;
+}
+
+
+bool ccOnlyKeys( const nlohmann::json& aObj, std::initializer_list<const char*> aKeys,
+                 std::string& aField )
+{
+    for( auto it = aObj.begin(); it != aObj.end(); ++it )
+    {
+        bool known = false;
+
+        for( const char* key : aKeys )
+            known = known || it.key() == key;
+
+        if( !known )
+        {
+            aField = it.key();
+            return false;
+        }
+    }
+
+    return true;
+}
+
+
+/// An axis { type, start, step } checked, then (aWrite) written into its three controls.
+bool ccWriteAxis( const nlohmann::json& aAxis, wxChoice& aType, wxTextCtrl& aStart,
+                  wxTextCtrl& aStep, bool aWrite )
+{
+    std::string ignored;
+
+    if( !aAxis.is_object() || !ccOnlyKeys( aAxis, { "type", "start", "step" }, ignored ) )
+        return false;
+
+    auto type = aAxis.find( "type" );
+
+    if( type != aAxis.end() )
+    {
+        if( !type->is_string() )
+            return false;
+
+        const std::string name = type->get<std::string>();
+        int               index = -1;
+
+        for( size_t ii = 0; ii < numberingTypeData.size(); ++ii )
+        {
+            if( name == ccNumberingName( numberingTypeData[ii].m_numbering_type ) )
+                index = static_cast<int>( ii );
+        }
+
+        if( index < 0 )
+            return false;
+
+        if( aWrite )
+            aType.SetSelection( index );
+    }
+
+    auto start = aAxis.find( "start" );
+
+    if( start != aAxis.end() )
+    {
+        if( !start->is_string() || start->get<std::string>().size() > 64 )
+            return false;
+
+        if( aWrite )
+            aStart.ChangeValue( wxString::FromUTF8( start->get<std::string>() ) );
+    }
+
+    std::optional<long> step;
+
+    if( !ccReadLong( aAxis, "step", step ) )
+        return false;
+
+    if( step && aWrite )
+        aStep.ChangeValue( wxString::Format( wxT( "%ld" ), *step ) );
+
+    return true;
+}
+
+} // namespace
+
+
+nlohmann::json DIALOG_CREATE_ARRAY::ccRecord()
+{
+    nlohmann::json grid;
+    grid["nx"] = ccLongOf( *m_entryNx, 0 );
+    grid["ny"] = ccLongOf( *m_entryNy, 0 );
+    grid["dx"] = pcbIUScale.IUTomm( m_hSpacing.GetIntValue() );
+    grid["dy"] = pcbIUScale.IUTomm( m_vSpacing.GetIntValue() );
+    grid["offsetX"] = pcbIUScale.IUTomm( m_hOffset.GetIntValue() );
+    grid["offsetY"] = pcbIUScale.IUTomm( m_vOffset.GetIntValue() );
+    grid["centred"] = m_rbCentreOnSource->GetValue();
+    grid["stagger"] = ccLongOf( *m_entryStagger, 1 );
+    grid["staggerRows"] = m_staggerRows->GetValue();
+    grid["horizontalThenVertical"] = m_radioBoxGridNumberingAxis->GetSelection() == 0;
+    grid["reverseNumberingAlternate"] = m_checkBoxGridReverseNumbering->GetValue();
+    grid["numberingStartSpecified"] = m_rbGridStartNumberingOpt->GetSelection() == 1;
+    grid["numbering2d"] = m_radioBoxGridNumberingScheme->GetSelection() != 0;
+    grid["primary"] = ccAxisRecord( *m_choicePriAxisNumbering, *m_entryGridPriNumberingOffset,
+                                    *m_entryGridPriNumberingStep );
+    grid["secondary"] = ccAxisRecord( *m_choiceSecAxisNumbering, *m_entryGridSecNumberingOffset,
+                                      *m_entryGridSecNumberingStep );
+
+    nlohmann::json circular;
+    circular["centreX"] = pcbIUScale.IUTomm( m_hCentre.GetIntValue() );
+    circular["centreY"] = pcbIUScale.IUTomm( m_vCentre.GetIntValue() );
+    circular["angle"] = EDA_UNIT_UTILS::UI::DoubleValueFromString( m_entryCircAngle->GetValue() );
+    circular["angleOffset"] =
+            EDA_UNIT_UTILS::UI::DoubleValueFromString( m_entryCircOffset->GetValue() );
+    circular["clockwise"] = m_rbCircDirection->GetSelection() == 0;
+    circular["count"] = ccLongOf( *m_entryCircCount, 0 );
+    circular["rotateItems"] = m_entryRotateItemsCb->GetValue();
+    circular["numberingStartSpecified"] = m_rbCircStartNumberingOpt->GetSelection() == 1;
+    circular["axis"] = ccAxisRecord( *m_choiceCircNumbering, *m_entryCircNumberingStart,
+                                     *m_entryCircNumberingStep );
+
+    nlohmann::json record;
+    record["shape"] = m_gridTypeNotebook->GetCurrentPage() == m_circularPanel ? "circular" : "grid";
+    record["arrangeSelection"] = m_radioBtnArrangeSelection->GetValue();
+    record["uniqueReferences"] = m_radioBtnUniqueRefs->GetValue();
+    record["padNumbering"] = m_isFootprintEditor;
+    record["grid"] = grid;
+    record["circular"] = circular;
+    return record;
+}
+
+
+bool DIALOG_CREATE_ARRAY::ccWriteAnswer( const nlohmann::json& aAnswer, std::string& aField )
+{
+    if( !aAnswer.is_object()
+            || !ccOnlyKeys( aAnswer, { "shape", "arrangeSelection", "uniqueReferences",
+                                       "padNumbering", "grid", "circular" }, aField ) )
+    {
+        return false;
+    }
+
+    // Read the whole answer first: nothing is written unless every key is good.
+    std::optional<bool> arrange, unique, padNumbering;
+
+    if( !ccReadBool( aAnswer, "arrangeSelection", arrange ) )
+        return ccRefuse( aField, "arrangeSelection" );
+
+    if( !ccReadBool( aAnswer, "uniqueReferences", unique ) )
+        return ccRefuse( aField, "uniqueReferences" );
+
+    if( !ccReadBool( aAnswer, "padNumbering", padNumbering ) )   // KiCad's, never written
+        return ccRefuse( aField, "padNumbering" );
+
+    int page = -1;
+    auto shape = aAnswer.find( "shape" );
+
+    if( shape != aAnswer.end() )
+    {
+        if( !shape->is_string()
+                || ( shape->get<std::string>() != "grid" && shape->get<std::string>() != "circular" ) )
+        {
+            return ccRefuse( aField, "shape" );
+        }
+
+        page = m_gridTypeNotebook->FindPage( shape->get<std::string>() == "grid" ? m_gridPanel
+                                                                                 : m_circularPanel );
+    }
+
+    struct GRID_IN
+    {
+        std::optional<long>   nx, ny, stagger;
+        std::optional<double> dx, dy, offsetX, offsetY;
+        std::optional<bool>   centred, staggerRows, hThenV, reverse, startSpecified, twoD;
+    } g;
+
+    auto grid = aAnswer.find( "grid" );
+
+    if( grid != aAnswer.end() )
+    {
+        std::string sub;
+
+        if( !grid->is_object()
+                || !ccOnlyKeys( *grid, { "nx", "ny", "dx", "dy", "offsetX", "offsetY", "centred",
+                                         "stagger", "staggerRows", "horizontalThenVertical",
+                                         "reverseNumberingAlternate", "numberingStartSpecified",
+                                         "numbering2d", "primary", "secondary" }, sub )
+                || !ccReadLong( *grid, "nx", g.nx ) || !ccReadLong( *grid, "ny", g.ny )
+                || !ccReadLong( *grid, "stagger", g.stagger )
+                || !ccReadNumber( *grid, "dx", CC_MAX_MM, g.dx )
+                || !ccReadNumber( *grid, "dy", CC_MAX_MM, g.dy )
+                || !ccReadNumber( *grid, "offsetX", CC_MAX_MM, g.offsetX )
+                || !ccReadNumber( *grid, "offsetY", CC_MAX_MM, g.offsetY )
+                || !ccReadBool( *grid, "centred", g.centred )
+                || !ccReadBool( *grid, "staggerRows", g.staggerRows )
+                || !ccReadBool( *grid, "horizontalThenVertical", g.hThenV )
+                || !ccReadBool( *grid, "reverseNumberingAlternate", g.reverse )
+                || !ccReadBool( *grid, "numberingStartSpecified", g.startSpecified )
+                || !ccReadBool( *grid, "numbering2d", g.twoD ) )
+        {
+            return ccRefuse( aField, "grid" );
+        }
+
+        auto pri = grid->find( "primary" );
+        auto sec = grid->find( "secondary" );
+
+        if( ( pri != grid->end()
+              && !ccWriteAxis( *pri, *m_choicePriAxisNumbering, *m_entryGridPriNumberingOffset,
+                               *m_entryGridPriNumberingStep, false ) )
+                || ( sec != grid->end()
+                     && !ccWriteAxis( *sec, *m_choiceSecAxisNumbering,
+                                      *m_entryGridSecNumberingOffset,
+                                      *m_entryGridSecNumberingStep, false ) ) )
+        {
+            return ccRefuse( aField, "grid" );
+        }
+    }
+
+    struct CIRC_IN
+    {
+        std::optional<double> centreX, centreY, angle, angleOffset;
+        std::optional<long>   count;
+        std::optional<bool>   clockwise, rotateItems, startSpecified;
+    } c;
+
+    auto circular = aAnswer.find( "circular" );
+
+    if( circular != aAnswer.end() )
+    {
+        std::string sub;
+
+        if( !circular->is_object()
+                || !ccOnlyKeys( *circular, { "centreX", "centreY", "angle", "angleOffset",
+                                             "clockwise", "count", "rotateItems",
+                                             "numberingStartSpecified", "axis" }, sub )
+                || !ccReadNumber( *circular, "centreX", CC_MAX_MM, c.centreX )
+                || !ccReadNumber( *circular, "centreY", CC_MAX_MM, c.centreY )
+                || !ccReadNumber( *circular, "angle", CC_MAX_DEG, c.angle )
+                || !ccReadNumber( *circular, "angleOffset", CC_MAX_DEG, c.angleOffset )
+                || !ccReadLong( *circular, "count", c.count )
+                || !ccReadBool( *circular, "clockwise", c.clockwise )
+                || !ccReadBool( *circular, "rotateItems", c.rotateItems )
+                || !ccReadBool( *circular, "numberingStartSpecified", c.startSpecified ) )
+        {
+            return ccRefuse( aField, "circular" );
+        }
+
+        auto axis = circular->find( "axis" );
+
+        if( axis != circular->end()
+                && !ccWriteAxis( *axis, *m_choiceCircNumbering, *m_entryCircNumberingStart,
+                                 *m_entryCircNumberingStep, false ) )
+        {
+            return ccRefuse( aField, "circular" );
+        }
+    }
+
+    // Every key read: write them into the dialog's own controls.
+    if( page >= 0 )
+        m_gridTypeNotebook->ChangeSelection( page );
+
+    if( arrange )
+        ( *arrange ? m_radioBtnArrangeSelection : m_radioBtnDuplicateSelection )->SetValue( true );
+
+    if( unique )
+        ( *unique ? m_radioBtnUniqueRefs : m_radioBtnKeepRefs )->SetValue( true );
+
+    if( g.nx )
+        m_entryNx->ChangeValue( wxString::Format( wxT( "%ld" ), *g.nx ) );
+
+    if( g.ny )
+        m_entryNy->ChangeValue( wxString::Format( wxT( "%ld" ), *g.ny ) );
+
+    if( g.dx )
+        m_hSpacing.ChangeValue( pcbIUScale.mmToIU( *g.dx ) );
+
+    if( g.dy )
+        m_vSpacing.ChangeValue( pcbIUScale.mmToIU( *g.dy ) );
+
+    if( g.offsetX )
+        m_hOffset.ChangeValue( pcbIUScale.mmToIU( *g.offsetX ) );
+
+    if( g.offsetY )
+        m_vOffset.ChangeValue( pcbIUScale.mmToIU( *g.offsetY ) );
+
+    if( g.centred )
+        ( *g.centred ? m_rbCentreOnSource : m_rbItemsRemainInPlace )->SetValue( true );
+
+    if( g.stagger )
+        m_entryStagger->ChangeValue( wxString::Format( wxT( "%ld" ), *g.stagger ) );
+
+    if( g.staggerRows )
+        ( *g.staggerRows ? m_staggerRows : m_staggerCols )->SetValue( true );
+
+    if( g.hThenV )
+        m_radioBoxGridNumberingAxis->SetSelection( *g.hThenV ? 0 : 1 );
+
+    if( g.reverse )
+        m_checkBoxGridReverseNumbering->SetValue( *g.reverse );
+
+    if( g.startSpecified )
+        m_rbGridStartNumberingOpt->SetSelection( *g.startSpecified ? 1 : 0 );
+
+    if( g.twoD )
+        m_radioBoxGridNumberingScheme->SetSelection( *g.twoD ? 1 : 0 );
+
+    if( grid != aAnswer.end() )
+    {
+        auto pri = grid->find( "primary" );
+        auto sec = grid->find( "secondary" );
+
+        if( pri != grid->end() )
+            ccWriteAxis( *pri, *m_choicePriAxisNumbering, *m_entryGridPriNumberingOffset,
+                         *m_entryGridPriNumberingStep, true );
+
+        if( sec != grid->end() )
+            ccWriteAxis( *sec, *m_choiceSecAxisNumbering, *m_entryGridSecNumberingOffset,
+                         *m_entryGridSecNumberingStep, true );
+    }
+
+    if( c.centreX )
+        m_hCentre.ChangeValue( pcbIUScale.mmToIU( *c.centreX ) );
+
+    if( c.centreY )
+        m_vCentre.ChangeValue( pcbIUScale.mmToIU( *c.centreY ) );
+
+    if( c.count )
+        m_entryCircCount->ChangeValue( wxString::Format( wxT( "%ld" ), *c.count ) );
+
+    if( c.angle )
+    {
+        // The answer's angle governs: KiCad's full circle box would derive it from the count.
+        m_checkBoxFullCircle->SetValue( false );
+        m_circAngle.ChangeAngleValue( EDA_ANGLE( *c.angle, DEGREES_T ) );
+    }
+
+    if( c.angleOffset )
+        m_circOffset.ChangeAngleValue( EDA_ANGLE( *c.angleOffset, DEGREES_T ) );
+
+    if( c.clockwise )
+        m_rbCircDirection->SetSelection( *c.clockwise ? 0 : 1 );
+
+    if( c.rotateItems )
+        m_entryRotateItemsCb->SetValue( *c.rotateItems );
+
+    if( c.startSpecified )
+        m_rbCircStartNumberingOpt->SetSelection( *c.startSpecified ? 1 : 0 );
+
+    if( circular != aAnswer.end() )
+    {
+        auto axis = circular->find( "axis" );
+
+        if( axis != circular->end() )
+            ccWriteAxis( *axis, *m_choiceCircNumbering, *m_entryCircNumberingStart,
+                         *m_entryCircNumberingStep, true );
+    }
+
+    setControlEnablement();
+    calculateCircularArrayProperties();
+    return true;
+}
+
+
+bool DIALOG_CREATE_ARRAY::Show( bool aShow )
+{
+    if( aShow )
+    {
+        // Already the host's: its card is open.
+        if( m_ccToken && CcParkedPrompts().count( m_ccToken ) )
+            return true;
+
+        m_ccToken = CcHostPromptModeless( "array", ccRecord(), this );
+
+        if( m_ccToken )
+            return true;
+    }
+
+    return DIALOG_CREATE_ARRAY_BASE::Show( aShow );
+}
+
+
+bool DIALOG_CREATE_ARRAY::CcApply( const nlohmann::json& aAnswer, std::string& aField )
+{
+    if( !ccWriteAnswer( aAnswer, aField ) )
+        return false;
+
+    // KiCad's own OK: validate, transfer (which closes the dialog, and ARRAY_TOOL then makes
+    // the array in one commit). A refusal keeps the prompt parked.
+    if( !Validate() || !TransferDataFromWindow() )
+        return false;
+
+    // The prompt ends with the dialog; the host's accepted answer closes its card.
+    CcParkedPrompts().erase( m_ccToken );
+    m_ccToken = 0;
+    return true;
+}
+
+
+bool DIALOG_CREATE_ARRAY::CcPick( const std::string& aKind )
+{
+    wxButton* button = aKind == "point" ? m_btnSelectCenterPoint
+                     : aKind == "item"  ? m_btnSelectCenterItem
+                                        : nullptr;
+
+    if( !button )
+        return false;
+
+    // The dialog's own picker: KiCad's PCB_PICKER_TOOL; its result arrives in
+    // UpdatePickedItem or UpdatePickedPoint, which sends the host the new record.
+    wxCommandEvent event( wxEVT_BUTTON, button->GetId() );
+    event.SetEventObject( button );
+    OnSelectCenterButton( event );
+    return true;
+}
+
+
+void DIALOG_CREATE_ARRAY::CcCancel()
+{
+    // KiCad's own cancel of this modeless dialog: close it with no options, so ARRAY_TOOL
+    // destroys it and makes nothing.
+    m_ccToken = 0;
+    Close();
+}
+
+#endif // __EMSCRIPTEN__
