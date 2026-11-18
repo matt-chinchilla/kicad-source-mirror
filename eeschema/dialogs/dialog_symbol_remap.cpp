@@ -20,6 +20,10 @@
  *
  * You should have received a copy of the GNU General Public License along
  * with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * Modified by Circuit Center Inc on 2026-11-18: the remap's body lifted into the free
+ * functions CcRemapLegacySymbols and CcMigrateProjectLegacyLibs for the WebAssembly build's
+ * windowless KiCad 5 open (no backup, every rescue candidate taken).
  */
 
 #include <macros.h>
@@ -48,6 +52,11 @@
 #include <wx/msgdlg.h>
 
 #include <dialog_symbol_remap.h>
+
+#ifdef __EMSCRIPTEN__
+#include <common.h>
+#include <libraries/library_table.h>
+#endif
 
 
 DIALOG_SYMBOL_REMAP::DIALOG_SYMBOL_REMAP( SCH_EDIT_FRAME* aParent ) :
@@ -545,3 +554,338 @@ void DIALOG_SYMBOL_REMAP::OnUpdateUIRemapButton( wxUpdateUIEvent& aEvent )
 {
     aEvent.Enable( !m_remapped );
 }
+
+
+#ifdef __EMSCRIPTEN__
+// Engine run 15, K-REMAP: DIALOG_SYMBOL_REMAP's body as free functions, so a KiCad 5 project
+// opens with no window. OnRemapSymbols less backupProject (the host keeps the files it was
+// given) and less the dialog's frame chrome; the rescue runs headless (project_rescue.cpp,
+// CcSetRescueHeadless). Each helper below is the dialog member of the same name, taking the
+// frame's project in place of the dialog's KIWAY_HOLDER.
+
+void CcSetRescueHeadless( REPORTER* aReporter );
+REPORTER* CcRescueHeadless();
+
+
+static size_t ccLibsNotInGlobalSymbolLibTable( PROJECT& aPrj,
+                                               std::vector<LEGACY_SYMBOL_LIB*>& aLibs )
+{
+    LIBRARY_MANAGER& mgr = Pgm().GetLibraryManager();
+
+    for( LEGACY_SYMBOL_LIB& lib : *PROJECT_SCH::LegacySchLibs( &aPrj ) )
+    {
+        // Ignore the cache library.
+        if( lib.IsCache() )
+            continue;
+
+        // Check for the obvious library name.
+        wxString libFileName = lib.GetFullFileName();
+
+        if( !mgr.FindRowByURI( LIBRARY_TABLE_TYPE::SYMBOL, libFileName ) )
+            aLibs.push_back( &lib );
+    }
+
+    return aLibs.size();
+}
+
+
+static void ccCreateProjectSymbolLibTable( PROJECT& aPrj, REPORTER& aReporter )
+{
+    SYMBOL_LIBRARY_ADAPTER* adapter = PROJECT_SCH::SymbolLibAdapter( &aPrj );
+    LIBRARY_MANAGER&        manager = Pgm().GetLibraryManager();
+
+    std::optional<LIBRARY_TABLE*> optTable = manager.Table( LIBRARY_TABLE_TYPE::SYMBOL,
+                                                            LIBRARY_TABLE_SCOPE::PROJECT );
+    wxCHECK( optTable, /* void */ );
+    LIBRARY_TABLE* projectTable = *optTable;
+
+    std::vector<LEGACY_SYMBOL_LIB*> libs;
+
+    if( ccLibsNotInGlobalSymbolLibTable( aPrj, libs ) )
+    {
+        std::vector<wxString> libNames = adapter->GetLibraryNames();
+
+        for( LEGACY_SYMBOL_LIB* lib : libs )
+        {
+            wxString libName = lib->GetName();
+            int libNameInc = 1;
+            int libNameLen = libName.Length();
+
+            // Spaces in the file name will break the symbol name because they are not
+            // quoted in the symbol library file format.
+            libName.Replace( wxS( " " ), wxS( "-" ) );
+
+            // Don't create duplicate table entries.
+            while( alg::contains( libNames, libName ) )
+            {
+                libName = libName.Left( libNameLen );
+                libName << libNameInc;
+                libNameInc++;
+            }
+
+            wxString   type = SCH_IO_MGR::ShowType( SCH_IO_MGR::SCH_LEGACY );
+            wxFileName fn( lib->GetFullFileName() );
+
+            wxString   normalizedPath = NormalizePath( fn, &Pgm().GetLocalEnvVariables(), &aPrj );
+            wxFileName normalizedFn( normalizedPath );
+
+            // Don't add symbol libraries that do not exist.
+            if( normalizedFn.Normalize( FN_NORMALIZE_FLAGS | wxPATH_NORM_ENV_VARS )
+                    && normalizedFn.FileExists() )
+            {
+                aReporter.Report( wxString::Format( _( "Adding library '%s', file '%s' to project "
+                                                       "symbol library table." ),
+                                                    libName,
+                                                    normalizedPath ),
+                                  RPT_SEVERITY_INFO );
+
+                LIBRARY_TABLE_ROW& newRow = projectTable->InsertRow();
+                newRow.SetNickname( libName );
+                newRow.SetURI( normalizedPath );
+                newRow.SetType( type );
+            }
+            else
+            {
+                aReporter.Report( wxString::Format( _( "Library '%s' not found." ), normalizedPath ),
+                                  RPT_SEVERITY_WARNING );
+            }
+        }
+
+        // Don't save empty project symbol library table.
+        if( !projectTable->Rows().empty() )
+        {
+            projectTable->Save().map_error(
+                    [&aReporter]( const LIBRARY_ERROR& aError )
+                    {
+                        aReporter.ReportTail( _( "Error saving library table:\n\n" ) + aError.message );
+                    } );
+
+            // Trigger a reload of the table and cancel an in-progress background load
+            Pgm().GetLibraryManager().ProjectChanged();
+
+            aReporter.ReportTail( _( "Created project symbol library table.\n" ), RPT_SEVERITY_INFO );
+        }
+    }
+}
+
+
+static bool ccRemapSymbolToLibTable( PROJECT& aPrj, SCH_SYMBOL* aSymbol )
+{
+    wxCHECK_MSG( aSymbol != nullptr, false, "Null pointer passed to remapSymbolToLibTable." );
+    wxCHECK_MSG( aSymbol->GetLibId().GetLibNickname().empty(), false,
+                 "Cannot remap symbol that is already mapped." );
+    wxCHECK_MSG( !aSymbol->GetLibId().GetLibItemName().empty(), false,
+                 "The symbol LIB_ID name is empty." );
+
+    for( LEGACY_SYMBOL_LIB& lib : *PROJECT_SCH::LegacySchLibs( &aPrj ) )
+    {
+        // Ignore the cache library.
+        if( lib.IsCache() )
+            continue;
+
+        LIB_SYMBOL* alias = lib.FindSymbol( aSymbol->GetLibId().GetLibItemName().wx_str() );
+
+        if( alias )
+        {
+            // Find the same library in the symbol library table using the full path and file name.
+            wxString libFileName = lib.GetFullFileName();
+
+            if( std::optional<wxString> nickname =
+                    PROJECT_SCH::SymbolLibAdapter( &aPrj )->FindLibraryByURI( libFileName ) )
+            {
+                LIB_ID id = aSymbol->GetLibId();
+
+                id.SetLibNickname( *nickname );
+
+                // Don't resolve symbol library links now.
+                aSymbol->SetLibId( id );
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+
+static void ccRemapSymbolsToLibTable( SCH_EDIT_FRAME* aFrame, REPORTER& aReporter )
+{
+    SCH_SCREENS  schematic( aFrame->Schematic().Root() );
+    SCH_SYMBOL*  symbol;
+    SCH_SCREEN*  screen;
+
+    for( screen = schematic.GetFirst(); screen; screen = schematic.GetNext() )
+    {
+        for( EDA_ITEM* item : screen->Items().OfType( SCH_SYMBOL_T ) )
+        {
+            symbol = dynamic_cast<SCH_SYMBOL*>( item );
+
+            wxCHECK2( symbol, continue );
+
+            if( !ccRemapSymbolToLibTable( aFrame->Prj(), symbol ) )
+            {
+                aReporter.Report( wxString::Format( _( "No symbol %s found in symbol library "
+                                                       "table." ),
+                                                    symbol->GetLibId().GetLibItemName().wx_str() ),
+                                  RPT_SEVERITY_WARNING );
+            }
+            else
+            {
+                aReporter.Report( wxString::Format( _( "Symbol %s mapped to symbol library '%s'." ),
+                                            symbol->GetLibId().GetLibItemName().wx_str(),
+                                            symbol->GetLibId().GetLibNickname().wx_str() ),
+                                  RPT_SEVERITY_ACTION );
+
+                screen->SetContentModified();
+            }
+        }
+    }
+
+    aReporter.Report( _( "Symbol library table mapping complete!" ), RPT_SEVERITY_INFO );
+    schematic.UpdateSymbolLinks();
+}
+
+
+/**
+ * DIALOG_SYMBOL_REMAP::OnRemapSymbols with no window and no backup: the legacy rescue with
+ * every candidate taken, the project symbol library table made from the legacy libraries,
+ * every symbol remapped to it, the legacy library list emptied and the cache reloaded.
+ * Every line the dialog's message panel would show goes to aReporter.
+ */
+bool CcRemapLegacySymbols( SCH_EDIT_FRAME* aFrame, REPORTER& aReporter )
+{
+    wxCHECK( aFrame, false );
+
+    PROJECT& prj = aFrame->Prj();
+
+    // Ignore the never show rescue setting for one last rescue of legacy symbol
+    // libraries before remapping to the symbol library table.
+    LEGACY_RESCUER rescuer( prj, &aFrame->Schematic(), &aFrame->GetCurrentSheet(),
+                            aFrame->GetCanvas()->GetBackend() );
+
+    REPORTER* outer = CcRescueHeadless();
+    CcSetRescueHeadless( &aReporter );
+    bool rescued = RESCUER::RescueProject( aFrame, rescuer, false );
+    CcSetRescueHeadless( outer );
+
+    if( rescued )
+    {
+        auto viewer = (SYMBOL_VIEWER_FRAME*) aFrame->Kiway().Player( FRAME_SCH_VIEWER, false );
+
+        if( viewer )
+            viewer->ReCreateLibList();
+
+        aFrame->ClearUndoORRedoList( EDA_BASE_FRAME::UNDO_LIST, 1 );
+        aFrame->OnModify();
+    }
+
+    wxFileName prjSymLibTableFileName( prj.GetProjectPath(), FILEEXT::SymbolLibraryTableFileName );
+
+    // Delete the existing project symbol library table.
+    if( prjSymLibTableFileName.FileExists() )
+        wxRemoveFile( prjSymLibTableFileName.GetFullPath() );
+
+    ccCreateProjectSymbolLibTable( prj, aReporter );
+
+    ccRemapSymbolsToLibTable( aFrame, aReporter );
+
+    // Remove all of the libraries from the legacy library list.
+    wxString      paths;
+    wxArrayString libNames;
+
+    LEGACY_SYMBOL_LIBS::SetLibNamesAndPaths( &prj, paths, libNames );
+
+    // Reload the cache symbol library.
+    prj.SetElem( PROJECT::ELEM::LEGACY_SYMBOL_LIBS, nullptr );
+
+    try
+    {
+        LEGACY_SYMBOL_LIBS* libs = new LEGACY_SYMBOL_LIBS();
+        prj.SetElem( PROJECT::ELEM::LEGACY_SYMBOL_LIBS, libs );
+        libs->LoadAllLibraries( &prj );
+    }
+    catch( const IO_ERROR& ioe )
+    {
+        aReporter.Report( ioe.What(), RPT_SEVERITY_WARNING );
+    }
+
+    return rescued;
+}
+
+
+/**
+ * The symbol library table panel's Migrate Libraries for the project table, with no window:
+ * every legacy (.lib) row whose file sits in the project folder is converted with
+ * SCH_IO_MGR::ConvertLibrary to a .kicad_sym beside it, and the row is pointed at the new file
+ * (nickname kept, so every symbol's LIB_ID stays valid). Returns the rows converted.
+ */
+int CcMigrateProjectLegacyLibs( PROJECT& aPrj, REPORTER& aReporter )
+{
+    LIBRARY_MANAGER& manager = Pgm().GetLibraryManager();
+
+    std::optional<LIBRARY_TABLE*> optTable = manager.Table( LIBRARY_TABLE_TYPE::SYMBOL,
+                                                            LIBRARY_TABLE_SCOPE::PROJECT );
+
+    if( !optTable || !*optTable )
+        return 0;
+
+    LIBRARY_TABLE* projectTable = *optTable;
+    wxString       legacyType = SCH_IO_MGR::ShowType( SCH_IO_MGR::SCH_LEGACY );
+    wxString       kicadType = SCH_IO_MGR::ShowType( SCH_IO_MGR::SCH_KICAD );
+    wxFileName     projectDir = wxFileName::DirName( aPrj.GetProjectPath() );
+    int            converted = 0;
+
+    for( LIBRARY_TABLE_ROW& row : projectTable->Rows() )
+    {
+        if( row.Type() != legacyType )
+            continue;
+
+        wxString   resolvedPath = ExpandEnvVarSubstitutions( row.URI(), &aPrj );
+        wxFileName legacyLib( resolvedPath );
+
+        if( !legacyLib.IsAbsolute() )
+            legacyLib.MakeAbsolute( aPrj.GetProjectPath() );
+
+        // Only the project's own files: a library outside the project folder is left alone.
+        if( legacyLib.GetPath() != projectDir.GetPath() || !legacyLib.FileExists() )
+            continue;
+
+        wxFileName newLib( legacyLib );
+        newLib.SetExt( FILEEXT::KiCadSymbolLibFileExtension );
+
+        std::map<std::string, UTF8> props( row.GetOptionsMap() );
+
+        if( SCH_IO_MGR::ConvertLibrary( &props, legacyLib.GetFullPath(), newLib.GetFullPath() ) )
+        {
+            row.SetURI( wxS( "${KIPRJMOD}/" ) + newLib.GetFullName() );
+            row.SetType( kicadType );
+            row.SetOptions( wxEmptyString );
+            converted++;
+
+            aReporter.Report( wxString::Format( _( "Library '%s' saved as '%s'." ), row.Nickname(),
+                                                newLib.GetFullName() ),
+                              RPT_SEVERITY_ACTION );
+        }
+        else
+        {
+            aReporter.Report( wxString::Format( _( "Failed to save symbol library file '%s'." ),
+                                                newLib.GetFullPath() ),
+                              RPT_SEVERITY_ERROR );
+        }
+    }
+
+    if( converted )
+    {
+        projectTable->Save().map_error(
+                [&aReporter]( const LIBRARY_ERROR& aError )
+                {
+                    aReporter.Report( _( "Error saving library table:\n\n" ) + aError.message,
+                                      RPT_SEVERITY_ERROR );
+                } );
+
+        manager.ProjectChanged();
+    }
+
+    return converted;
+}
+#endif
