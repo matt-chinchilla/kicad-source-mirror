@@ -21,9 +21,11 @@
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
  *
- * Modified by Circuit Center Inc on 2026-11-18: in the WebAssembly build a host may run the
+ * Modified by Circuit Center Inc on 2026-11-18: K-REMAP and st-rescue-e. In the WebAssembly build a host may run the
  * rescue with no window (CcSetRescueHeadless): every candidate is taken in place of
- * DIALOG_RESCUE_EACH and the message boxes become lines on the host's reporter.
+ * DIALOG_RESCUE_EACH and the message boxes become lines on the host's reporter; and
+ * (CcSetRescueFromDesign) the symbol library table rescuer takes a symbol's copy held in the
+ * design as its cache candidate, so a KiCad 6 or later design can rescue a missing source.
  */
 
 #include <sch_draw_panel.h>
@@ -64,6 +66,19 @@ void CcSetRescueHeadless( REPORTER* aReporter )
 REPORTER* CcRescueHeadless()
 {
     return s_ccRescueHeadless;
+}
+
+
+// The design as the cache (engine run 15, st-rescue-e): a KiCad 6 or later design carries no
+// legacy cache library; the copy of each symbol it holds (the schematic's lib_symbols, the
+// symbol's own LIB_SYMBOL) is that cache. While set, RESCUE_SYMBOL_LIB_TABLE_CANDIDATE takes
+// that copy when no legacy cache library holds the symbol. Set and cleared by the bindings.
+static bool s_ccRescueFromDesign = false;
+
+
+void CcSetRescueFromDesign( bool aFromDesign )
+{
+    s_ccRescueFromDesign = aFromDesign;
 }
 #endif
 
@@ -406,6 +421,11 @@ void RESCUE_SYMBOL_LIB_TABLE_CANDIDATE::FindRescues( RESCUER& aRescuer,
                                    symbol_id.GetLibItemName().wx_str() );
                 cache_match = findSymbol( symbolName, PROJECT_SCH::LegacySchLibs( aRescuer.GetPrj() ), true );
             }
+
+#ifdef __EMSCRIPTEN__
+            if( !cache_match && s_ccRescueFromDesign )
+                cache_match = eachSymbol->GetLibSymbolRef().get();
+#endif
 
             // Get the library symbol from the symbol library table.
             lib_match = SchGetLibSymbol( symbol_id, PROJECT_SCH::SymbolLibAdapter( aRescuer.GetPrj() ) );
