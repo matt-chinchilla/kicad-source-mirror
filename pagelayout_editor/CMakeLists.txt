@@ -152,6 +152,28 @@ set( PL_EDITOR_KIFACE_LIBRARIES
     ${wxWidgets_LIBRARIES}
     )
 
+if( EMSCRIPTEN AND KICAD_WASM_MERGED_EDITOR )
+    # Modified by Circuit Center Inc on 2026-11-18: the merged editor image (kicad_editor)
+    # links pl_editor as a FOURTH kiface beside pcbnew, eeschema and cvpcb, so the
+    # --frame=ds page boots PL_EDITOR_FRAME (cvpcb's merged block is the precedent).
+    # The getter gets its own name (no BUILD_KIWAY_DLL, statically linked) and Kiface()
+    # its own accessor so this module's calls bind to its own kiface instance; every
+    # further name the merged symbol audit finds joins KICAD_WASM_PL_SIDE_RENAMES.
+    set( KICAD_WASM_PL_SIDE_RENAMES
+        Kiface=PlKiface
+        )
+    target_compile_definitions( pl_editor_kiface_objects PRIVATE ${KICAD_WASM_PL_SIDE_RENAMES} )
+
+    set_source_files_properties( pl_editor.cpp PROPERTIES
+        COMPILE_DEFINITIONS     "COMPILING_DLL;KIFACE_GETTER=pl_editor_kiface_getter"
+        )
+
+    # Export for the merged kicad_editor target (wasm/editor/), which links the kiface
+    # library sets from outside this directory scope. The editor subdir is added AFTER
+    # pagelayout_editor/ at the top level, so this cache entry exists there.
+    set( PL_EDITOR_KIFACE_LIBRARIES "${PL_EDITOR_KIFACE_LIBRARIES}" CACHE INTERNAL "" )
+endif()
+
 # WASM: Link kiface objects directly into pl_editor executable (static linking)
 if( EMSCRIPTEN )
     target_link_libraries( pl_editor
