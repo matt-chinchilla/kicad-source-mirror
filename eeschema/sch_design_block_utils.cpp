@@ -3,6 +3,10 @@
  *
  * Copyright The KiCad Developers, see AUTHORS.txt for contributors.
  *
+ * Modified by Circuit Center Inc on 2026-11-18: in the WebAssembly editor the block writing
+ * bodies of SaveSheetAsDesignBlock and SaveSelectionAsDesignBlock are also free functions that
+ * take a folder, with no dialog and no library write (engine run 15, K-B3).
+ *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
  * as published by the Free Software Foundation; either version 2
@@ -668,3 +672,170 @@ bool SCH_EDIT_FRAME::UpdateDesignBlockFromSelection( const LIB_ID& aLibId )
 
     return success;
 }
+
+
+#ifdef __EMSCRIPTEN__
+
+#include <cc_sch_design_block_write.h>
+#include <sch_io/sch_io.h>
+#include <sch_io/sch_io_mgr.h>
+#include <sch_sheet_path.h>
+#include <sch_symbol.h>
+#include <wx/filefn.h>
+
+
+static bool ccWriteDesignBlockSchematic( SCH_EDIT_FRAME* aFrame, SCH_SHEET* aSheet,
+                                         const wxString& aFolder, const wxString& aName,
+                                         std::vector<wxString>& aLines )
+{
+    wxFileName fn( aFolder, aName, FILEEXT::KiCadSchematicFileExtension );
+
+    if( !wxFileName::DirExists( aFolder )
+            && !wxFileName::Mkdir( aFolder, wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL ) )
+    {
+        aLines.push_back( wxString::Format( _( "Cannot create output directory '%s'." ),
+                                            aFolder ) );
+        return false;
+    }
+
+    // The writer of SCH_EDIT_FRAME::saveSchematicFile, the call the design block saves make
+    IO_RELEASER<SCH_IO> pi( SCH_IO_MGR::FindPlugin( SCH_IO_MGR::SCH_KICAD ) );
+
+    try
+    {
+        pi->SaveSchematicFile( fn.GetFullPath(), aSheet, &aFrame->Schematic() );
+    }
+    catch( const IO_ERROR& ioe )
+    {
+        aLines.push_back( wxString::Format( _( "Error saving schematic file '%s'.\n%s" ),
+                                            fn.GetFullPath(), ioe.What() ) );
+        return false;
+    }
+
+    return true;
+}
+
+
+bool CcWriteSheetDesignBlock( SCH_EDIT_FRAME* aFrame, const SCH_SHEET_PATH& aSheetPath,
+                              const wxString& aFolder, const wxString& aName,
+                              std::vector<wxString>& aLines )
+{
+    if( !aFrame || aSheetPath.empty() || !aSheetPath.LastScreen() )
+        return false;
+
+    // Just block all attempts to create design blocks with nested sheets at this point
+    std::vector<SCH_ITEM*> sheets;
+    aSheetPath.LastScreen()->GetSheets( &sheets );
+
+    if( !sheets.empty() )
+    {
+        aLines.push_back( _( "Design blocks with nested sheets are not supported." ) );
+        return false;
+    }
+
+    return ccWriteDesignBlockSchematic( aFrame, aSheetPath.Last(), aFolder, aName, aLines );
+}
+
+
+bool CcWriteSchSelectionDesignBlock( SCH_EDIT_FRAME* aFrame, const wxString& aFolder,
+                                     const wxString& aName, std::vector<wxString>& aLines )
+{
+    if( !aFrame )
+        return false;
+
+    // Get all selected items
+    SCH_SELECTION selection =
+            aFrame->GetToolManager()->GetTool<SCH_SELECTION_TOOL>()->GetSelection();
+
+    if( selection.Empty() )
+    {
+        aLines.push_back( _( "Please select some items to save as a design block." ) );
+        return false;
+    }
+
+    // Just block all attempts to create design blocks with nested sheets at this point (a
+    // single selected sheet is KiCad's save of that sheet)
+    if( selection.HasType( SCH_SHEET_T ) )
+    {
+        if( selection.Size() == 1 )
+        {
+            SCH_SHEET*     sheet = static_cast<SCH_SHEET*>( selection.Front() );
+            SCH_SHEET_PATH curPath = aFrame->GetCurrentSheet();
+
+            curPath.push_back( sheet );
+            return CcWriteSheetDesignBlock( aFrame, curPath, aFolder, aName, aLines );
+        }
+
+        aLines.push_back( _( "Design blocks with nested sheets are not supported." ) );
+        return false;
+    }
+
+    SCH_GROUP* group = nullptr;
+
+    if( selection.Size() == 1 && selection.HasType( SCH_GROUP_T ) )
+        group = static_cast<SCH_GROUP*>( selection.Front() );
+
+    // Create a temporary screen
+    SCH_SCREEN* tempScreen = new SCH_SCREEN( &aFrame->Schematic() );
+
+    // If we have a single group, we want to strip the group and select the children
+    if( group )
+    {
+        selection.Remove( group );
+
+        // Don't recurse; if we have a group of groups the user probably intends the inner groups to be saved
+        group->RunOnChildren(
+                [&]( EDA_ITEM* aItem )
+                {
+                    selection.Add( aItem );
+                },
+                RECURSE_MODE::NO_RECURSE );
+    }
+
+    // Copy the selected items to the temporary screen
+    for( EDA_ITEM* item : selection )
+    {
+        // We need to deep copy since selections of groups will not have the children
+        if( item->Type() == SCH_GROUP_T )
+        {
+            SCH_GROUP* clonedGroup = static_cast<SCH_GROUP*>( item )->DeepClone();
+
+            tempScreen->Append( clonedGroup );
+
+            clonedGroup->RunOnChildren(
+                                        [&]( EDA_ITEM* aItem )
+                                        {
+                                            tempScreen->Append( static_cast<SCH_ITEM*>( aItem ) );
+                                        },
+                                        RECURSE_MODE::RECURSE );
+        }
+        else if( item->Type() == SCH_SYMBOL_T )
+        {
+            SCH_SYMBOL* clonedSymbol = static_cast<SCH_SYMBOL*>( item->Clone() );
+            tempScreen->Append( clonedSymbol );
+        }
+        else if( item->Type() == SCH_PIN_T || item->Type() == SCH_FIELD_T )
+        {
+            // Handled as symbol children
+            continue;
+        }
+        else
+        {
+            EDA_ITEM* copy = item->Clone();
+            tempScreen->Append( static_cast<SCH_ITEM*>( copy ) );
+        }
+    }
+
+    // Create a sheet for the temporary screen
+    SCH_SHEET* tempSheet = new SCH_SHEET( &aFrame->Schematic() );
+    tempSheet->SetScreen( tempScreen );
+
+    bool ok = ccWriteDesignBlockSchematic( aFrame, tempSheet, aFolder, aName, aLines );
+
+    // The sheet owns the temporary screen and the screen its copies
+    delete tempSheet;
+
+    return ok;
+}
+
+#endif // __EMSCRIPTEN__
