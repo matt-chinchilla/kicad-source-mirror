@@ -4,6 +4,10 @@
  * Copyright (C) 2020-2021 Roberto Fernandez Bautista <roberto.fer.bau@gmail.com>
  * Copyright The KiCad Developers, see AUTHORS.txt for contributors.
  *
+ * Modified by Circuit Center Inc on 2026-11-19: under __EMSCRIPTEN__ a design with no usable
+ * screen grid is sized and centered on a 50 mil grid with a warning in the import's report,
+ * in place of a divide by zero; a plain build is unchanged.
+ *
  * This program is free software: you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
  * Free Software Foundation, either version 3 of the License, or (at your
@@ -408,6 +412,11 @@ void CADSTAR_SCH_ARCHIVE_LOADER::Load( SCHEMATIC* aSchematic, SCH_SHEET* aRootSh
     }
 
 
+#ifdef __EMSCRIPTEN__
+    // A design with no usable screen grid is said once in the import's report, not per sheet.
+    bool ccNoScreenGridReported = false;
+
+#endif
     // For all sheets, center all elements and re calculate the page size:
     for( std::pair<LAYER_ID, SCH_SHEET*> sheetPair : m_sheetMap )
     {
@@ -454,12 +463,44 @@ void CADSTAR_SCH_ARCHIVE_LOADER::Load( SCHEMATIC* aSchematic, SCH_SHEET* aRootSh
         // Find the screen grid of the original CADSTAR design
         int grid = Assignments.Grids.ScreenGrid.Param1;
 
+#ifdef __EMSCRIPTEN__
+        // A file that sets no screen grid (or a fractional one with no divisor, or one that
+        // rounds to nothing in KiCad's units) left nothing to divide by below: the import
+        // trapped. Such a design takes the 50 mil grid this loader already places hidden pins
+        // on, and the import's report says so.
+        if( Assignments.Grids.ScreenGrid.Type == GRID_TYPE::FRACTIONALGRID )
+        {
+            grid = Assignments.Grids.ScreenGrid.Param2 > 0
+                           ? grid / Assignments.Grids.ScreenGrid.Param2
+                           : 0;
+        }
+        else if( Assignments.Grids.ScreenGrid.Param2 > grid )
+        {
+            grid = Assignments.Grids.ScreenGrid.Param2;
+        }
+
+        grid = getKiCadLength( grid );
+
+        if( grid <= 0 )
+        {
+            grid = schIUScale.MilsToIU( 50 );
+
+            if( !ccNoScreenGridReported )
+            {
+                ccNoScreenGridReported = true;
+                m_reporter->Report( _( "The CADSTAR design sets no screen grid. Its sheets were "
+                                       "sized and centered on a 50 mil grid." ),
+                                    RPT_SEVERITY_WARNING );
+            }
+        }
+#else
         if( Assignments.Grids.ScreenGrid.Type == GRID_TYPE::FRACTIONALGRID )
             grid = grid / Assignments.Grids.ScreenGrid.Param2;
         else if( Assignments.Grids.ScreenGrid.Param2 > grid )
             grid = Assignments.Grids.ScreenGrid.Param2;
 
         grid = getKiCadLength( grid );
+#endif
 
         auto roundToNearestGrid =
                 [&]( int aNumber ) -> int
