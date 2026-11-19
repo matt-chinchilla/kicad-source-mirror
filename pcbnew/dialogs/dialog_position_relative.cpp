@@ -24,6 +24,8 @@
  * (host_prompt.h, ask positionRelative, modeless) before it shows, sends the open card each
  * pick's result, and runs its own OnOkClick, origin buttons, pickers and cancel for the host's
  * answers; a plain build is unchanged.
+ * Modified by Circuit Center Inc on 2026-11-19: an accepted host answer is checked at once and
+ * its move runs from the frame's event loop, where the commit may wait.
  */
 
 #include "dialogs/dialog_position_relative.h"
@@ -378,9 +380,9 @@ void DIALOG_POSITION_RELATIVE::OnTextFocusLost( wxFocusEvent& event )
 
 #ifdef __EMSCRIPTEN__
 
-// The host prompt (host_prompt.h, ask "positionRelative", modeless). The answer { x, y } runs
-// this dialog's own OnOkClick (the move, one commit "Position Relative"), then the dialog
-// closes as KiCad's OK closes it; { anchor: "gridOrigin" | "userOrigin" } runs the matching
+// The host prompt (host_prompt.h, ask "positionRelative", modeless). The answer { x, y } closes
+// the dialog as KiCad's OK closes it and runs this dialog's own OnOkClick (the move, one commit
+// "Position Relative") from the frame's event loop; { anchor: "gridOrigin" | "userOrigin" } runs the matching
 // button's handler and the card is sent the new record; prompt.pick runs the item and point
 // buttons' handlers.
 
@@ -525,14 +527,30 @@ bool DIALOG_POSITION_RELATIVE::CcApply( const nlohmann::json& aAnswer, std::stri
     m_stateX = m_xOffset.GetDoubleValue();
     m_stateY = m_yOffset.GetDoubleValue();
 
-    wxCommandEvent event( wxEVT_BUTTON, wxID_OK );
-    event.SetEventObject( m_stdButtonsOK );
-    OnOkClick( event );
+    // OnOkClick's own check, made here so the answer is refused at once when it fails.
+    VECTOR2I translation;
+
+    if( !getTranslationInIU( translation, false ) )
+    {
+        aField = x ? "x" : "y";
+        return false;
+    }
 
     // KiCad's OK closes this modeless dialog (it is kept for the next use): the prompt ends.
     CcParkedPrompts().erase( m_ccToken );
     m_ccToken = 0;
     DIALOG_POSITION_RELATIVE_BASE::Show( false );
+
+    // The move (one commit "Position Relative") is this dialog's own OnOkClick, run from the
+    // frame's event loop: the plain kicadPromptAnswer call it is answered from cannot wait,
+    // and KiCad's commit may.
+    CallAfter( [this]()
+               {
+                   wxCommandEvent event( wxEVT_BUTTON, wxID_OK );
+                   event.SetEventObject( m_stdButtonsOK );
+                   OnOkClick( event );
+               } );
+
     return true;
 }
 
