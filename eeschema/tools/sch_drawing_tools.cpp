@@ -13,6 +13,9 @@
  * Modified by Circuit Center Inc on 2026-11-18: placing a design block takes the block the
  * in-browser host holds (K-B1) with its own place options, never the Design Blocks pane
  * (under __EMSCRIPTEN__).
+ * Modified by Circuit Center Inc on 2026-11-18: a host block placed as a sheet hangs off the
+ * pointer and goes down on one press, its name and file from the block, never the sheet
+ * properties dialog (under __EMSCRIPTEN__).
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -3487,6 +3490,12 @@ int SCH_DRAWING_TOOLS::DrawSheet( const TOOL_EVENT& aEvent )
     if( aEvent.HasPosition() && !( isDrawSheetCopy || isDrawSheetFromDesignBlock ) )
         m_toolMgr->PrimeTool( aEvent.Position() );
 
+#ifdef __EMSCRIPTEN__
+    // K-B1: a host block placed as a sheet is one press: its box (KiCad's smallest sheet)
+    // hangs off the pointer, the press puts it down with the block's name and file.
+    const bool ccHostBlockSheet = isDrawSheetFromDesignBlock && s_ccBlockOptions.has_value();
+#endif
+
     // Main loop: keep receiving events
     while( TOOL_EVENT* evt = Wait() )
     {
@@ -3648,6 +3657,13 @@ int SCH_DRAWING_TOOLS::DrawSheet( const TOOL_EVENT& aEvent )
 
             m_view->ClearPreview();
             m_view->AddToPreview( sheet->Clone() );
+
+#ifdef __EMSCRIPTEN__
+            // K-B1: the same press puts a host block's sheet down (the finish below, queued
+            // and run before this press's dispatch returns), never a second press.
+            if( ccHostBlockSheet )
+                m_toolMgr->PostAction( ACTIONS::finishInteractive );
+#endif
         }
         else if( sheet && (   evt->IsClick( BUT_LEFT ) || evt->IsDblClick( BUT_LEFT )
                            || isSyntheticClick
@@ -3661,6 +3677,22 @@ int SCH_DRAWING_TOOLS::DrawSheet( const TOOL_EVENT& aEvent )
 #ifdef __EMSCRIPTEN__
             bool sheetTaken = false;
 
+            if( ccHostBlockSheet )
+            {
+                // K-B1: the block's sheet goes down as the dialog's OK would leave it with the
+                // name and file made above: the file the first free one of the block's name,
+                // a copy of the block's schematic, with no dialog and no message box.
+                const wxString file = ccNextSheetFileName( m_frame, sheet->GetFileName() );
+                bool           clearAnnotation = false;
+
+                sheetTaken = ccChangeSheetFile( m_frame, sheet, m_frame->GetCurrentSheet(), file,
+                                                CC_SHEET_FILE_MODE::RENAME, &clearAnnotation,
+                                                nullptr, &filename, nullptr );
+
+                if( sheetTaken )
+                    sheet->SetFileName( file );
+            }
+            else
             // The host's form edits the sheet once drawn: it goes down as KiCad's sheet dialog's
             // OK would leave it, its name as made above and its file the first free one of that
             // name (ccNextSheetFileName), made through ChangeSheetFile's steps with no message box.
@@ -3820,6 +3852,21 @@ int SCH_DRAWING_TOOLS::DrawSheet( const TOOL_EVENT& aEvent )
             evt->SetPassEvent();
             break;
         }
+#ifdef __EMSCRIPTEN__
+        else if( !sheet && ccHostBlockSheet
+                 && ( evt->IsAction( &ACTIONS::refreshPreview ) || evt->IsMotion() ) )
+        {
+            // K-B1: the block's box hangs off the pointer until the press.
+            SCH_SHEET ghost( m_frame->GetCurrentSheet().Last(), cursorPos );
+            ghost.GetField( FIELD_T::SHEET_NAME )->SetText( designBlock->GetLibId().GetLibItemName() );
+            ghost.SetBorderWidth( schIUScale.MilsToIU( cfg->m_Drawing.default_line_thickness ) );
+            ghost.SetBorderColor( cfg->m_Drawing.default_sheet_border_color );
+            ghost.SetBackgroundColor( cfg->m_Drawing.default_sheet_background_color );
+            sizeSheet( &ghost, cursorPos );
+            m_view->ClearPreview();
+            m_view->AddToPreview( ghost.Clone() );
+        }
+#endif
         else if( sheet && ( evt->IsAction( &ACTIONS::refreshPreview ) || evt->IsMotion()
                            || evt->IsDrag( BUT_LEFT ) ) )
         {
@@ -3853,6 +3900,15 @@ int SCH_DRAWING_TOOLS::DrawSheet( const TOOL_EVENT& aEvent )
     getViewControls()->SetAutoPan( false );
     getViewControls()->CaptureCursor( false );
     m_frame->GetCanvas()->SetCurrentCursor( KICURSOR::ARROW );
+
+#ifdef __EMSCRIPTEN__
+    // K-B1: a host block's options end with its tool, placed or canceled.
+    if( ccHostBlockSheet )
+    {
+        s_ccBlockOptions.reset();
+        m_view->ClearPreview();
+    }
+#endif
 
     return 0;
 }
