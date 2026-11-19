@@ -5,6 +5,9 @@
  * Copyright The KiCad Developers, see AUTHORS.txt for contributors.
  *
  * @author Jean-Pierre Charras, jp.charras at wanadoo.fr
+ * Modified by Circuit Center Inc on 2026-11-18: in the WebAssembly editor, a string writer that
+ * leaves the items' (uuid ...) tokens out, for a sheet a stock KiCad 10.0 must read (K-DS2,
+ * CcDsSaveInStringForStockKicad, declared in pagelayout_editor/ds_editor_host.h).
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -79,6 +82,12 @@ private:
 
 protected:
     OUTPUTFORMATTER* m_out;
+
+#ifdef __EMSCRIPTEN__
+    // K-DS2: false only for CcDsSaveInStringForStockKicad's writer. KiCad 10.0's parser refuses
+    // the items' (uuid ...) tokens, so a sheet meant for a stock KiCad is written without them.
+    bool m_ccWriteUuids = true;
+#endif
 };
 
 
@@ -167,6 +176,32 @@ void DS_DATA_MODEL::SaveInString( std::vector<DS_DATA_ITEM*>& aItemsList, wxStri
 }
 
 
+#ifdef __EMSCRIPTEN__
+/**
+ * K-DS2: the string writer of a sheet a stock KiCad 10.0 reads, the model's whole text as
+ * DS_DATA_MODEL::SaveInString writes it with no (uuid ...) token. Only the take of the
+ * WebAssembly drawing sheet editor uses it; the undo copies and every other writer keep the
+ * uuids, and the parser still reads them (an item read without one takes a fresh one).
+ */
+class DS_DATA_MODEL_STOCK_STRINGIO : public DS_DATA_MODEL_STRINGIO
+{
+public:
+    DS_DATA_MODEL_STOCK_STRINGIO( wxString* aOutputString ) :
+            DS_DATA_MODEL_STRINGIO( aOutputString )
+    {
+        m_ccWriteUuids = false;
+    }
+};
+
+
+void CcDsSaveInStringForStockKicad( DS_DATA_MODEL* aModel, wxString* aOutputString )
+{
+    DS_DATA_MODEL_STOCK_STRINGIO writer( aOutputString );
+    writer.Format( aModel );
+}
+#endif
+
+
 void DS_DATA_MODEL_IO::Format( DS_DATA_MODEL* aModel, std::vector<DS_DATA_ITEM*>& aItemsList ) const
 {
     LOCALE_IO   toggle;     // switch on/off the locale "C" notation
@@ -250,7 +285,10 @@ void DS_DATA_MODEL_IO::Format( DS_DATA_MODEL* aSheet ) const
 void DS_DATA_MODEL_IO::format( DS_DATA_ITEM_TEXT* aItem ) const
 {
     m_out->Print( "(tbtext %s", m_out->Quotew( aItem->m_TextBase ).c_str() );
-    KICAD_FORMAT::FormatUuid( m_out, aItem->m_Uuid );
+#ifdef __EMSCRIPTEN__
+    if( m_ccWriteUuids )
+#endif
+        KICAD_FORMAT::FormatUuid( m_out, aItem->m_Uuid );
     m_out->Print( "(name %s)", m_out->Quotew( aItem->m_Name ).c_str() );
 
     formatCoordinate( getTokenName( T_pos ), aItem->m_Pos );
@@ -343,7 +381,10 @@ void DS_DATA_MODEL_IO::format( DS_DATA_MODEL* aModel, DS_DATA_ITEM* aItem ) cons
     else
         m_out->Print( "(line" );
 
-    KICAD_FORMAT::FormatUuid( m_out, aItem->m_Uuid );
+#ifdef __EMSCRIPTEN__
+    if( m_ccWriteUuids )
+#endif
+        KICAD_FORMAT::FormatUuid( m_out, aItem->m_Uuid );
     m_out->Print( "(name %s)", m_out->Quotew( aItem->m_Name ).c_str() );
 
     formatCoordinate( getTokenName( T_start ), aItem->m_Pos );
@@ -365,7 +406,10 @@ void DS_DATA_MODEL_IO::format( DS_DATA_MODEL* aModel, DS_DATA_ITEM* aItem ) cons
 void DS_DATA_MODEL_IO::format( DS_DATA_ITEM_POLYGONS* aItem ) const
 {
     m_out->Print( "(polygon" );
-    KICAD_FORMAT::FormatUuid( m_out, aItem->m_Uuid );
+#ifdef __EMSCRIPTEN__
+    if( m_ccWriteUuids )
+#endif
+        KICAD_FORMAT::FormatUuid( m_out, aItem->m_Uuid );
     m_out->Print( "(name %s)", m_out->Quotew( aItem->m_Name ).c_str() );
     formatCoordinate( "pos", aItem->m_Pos );
     formatOptions( aItem );
@@ -412,7 +456,10 @@ void DS_DATA_MODEL_IO::format( DS_DATA_ITEM_BITMAP* aItem ) const
         return;
 
     m_out->Print( "(bitmap" );
-    KICAD_FORMAT::FormatUuid( m_out, aItem->m_Uuid );
+#ifdef __EMSCRIPTEN__
+    if( m_ccWriteUuids )
+#endif
+        KICAD_FORMAT::FormatUuid( m_out, aItem->m_Uuid );
     m_out->Print( "(name %s)", m_out->Quotew( aItem->m_Name ).c_str() );
     formatCoordinate( "pos", aItem->m_Pos );
     formatOptions( aItem );

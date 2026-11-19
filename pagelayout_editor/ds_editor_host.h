@@ -35,6 +35,15 @@ inline CC_DS_ARMED_IMAGE& CcArmedImage()
     return s_image;
 }
 
+class DS_DATA_MODEL;
+
+/**
+ * K-DS2 (common/drawing_sheet/ds_data_model_io.cpp): writes aModel to aOutputString as
+ * DS_DATA_MODEL::SaveInString does, with no (uuid ...) token, so KiCad 10.0's own parser (and
+ * kicad-cli 10.0) reads the text. Used by kicadDsEditTake alone.
+ */
+void CcDsSaveInStringForStockKicad( DS_DATA_MODEL* aModel, wxString* aOutputString );
+
 /**
  * Asks the WebAssembly editor's host for what the drawing sheet editor would ask of a KiCad
  * window (engine run 15, the island's ev.dsedit): window.kicadHostDsEdit.onRequest(json) with
