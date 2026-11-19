@@ -26,6 +26,8 @@
  * refusal's sentence is captured in place of wxMessageBox; a plain build is unchanged.
  * Modified by Circuit Center Inc on 2026-11-19: the array ask's record keys centerX, centerY
  * and centered take the American spelling.
+ * Modified by Circuit Center Inc on 2026-11-19: an accepted host answer closes the dialog from
+ * the frame's event loop, so the array is made where its commit may wait.
  */
 
 #include "dialogs/dialog_create_array.h"
@@ -625,7 +627,17 @@ bool DIALOG_CREATE_ARRAY::TransferDataFromWindow()
 
     // This dialog is not modal, so close it now if successful
     if( ret )
+    {
+#ifdef __EMSCRIPTEN__
+        // A host answer is applied inside the plain kicadPromptAnswer call, which cannot wait:
+        // the close (ARRAY_TOOL then makes the array in one commit) runs from the frame's event
+        // loop, where KiCad's commit may wait as it does after a press of OK.
+        if( CcPromptCapturing() )
+            CallAfter( [this]() { Close(); } );
+        else
+#endif
         Close();
+    }
 
     return ret;
 }
@@ -1229,8 +1241,9 @@ bool DIALOG_CREATE_ARRAY::CcApply( const nlohmann::json& aAnswer, std::string& a
     if( !ccWriteAnswer( aAnswer, aField ) )
         return false;
 
-    // KiCad's own OK: validate, transfer (which closes the dialog, and ARRAY_TOOL then makes
-    // the array in one commit). A refusal keeps the prompt parked.
+    // KiCad's own OK: validate, transfer (which queues the dialog's close on the frame's event
+    // loop, and ARRAY_TOOL then makes the array in one commit). A refusal keeps the prompt
+    // parked.
     if( !Validate() || !TransferDataFromWindow() )
         return false;
 
