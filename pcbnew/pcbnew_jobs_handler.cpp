@@ -18,6 +18,9 @@
  * picture's own size in pixels (KiCad's raytracer rounds the size asked down to whole blocks).
  * Modified by Circuit Center Inc on 2026-11-18: in the WebAssembly build the 3D export names its
  * default file for the compressed STEP format (.stpz), which KiCad's default name switch left out.
+ * Modified by Circuit Center Inc on 2026-11-19: the WebAssembly render job also writes each of
+ * its progress lines into the run folder's lines file as it reports it, whole on disk before the
+ * job yields, so the page reads the render's progress while it runs.
  *
  * This program is free software: you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -113,7 +116,9 @@
 #include <emscripten.h>
 #include <emscripten/threading.h>
 #include <algorithm>
+#include <cstdio>
 #include <functional>
+#include <string>
 #include <3d_rendering/raytracing/render_3d_raytrace_ram.h>
 #include <3d_rendering/track_ball.h>
 #endif
@@ -1056,20 +1061,43 @@ public:
 
     bool HasMessage() const override { return false; }
 
-    /// "Rendering <n> percent" on aReporter when the percent moved since the last line.
+    /// The run folder whose lines file (".cc-export.json.lines", beside the record the host
+    /// reads at the end, the island's EXPORT_LINES) takes each progress line as it is reported.
+    /// A file left by an earlier run of the folder is removed first.
+    void SetRunFolder( const wxString& aRunDir )
+    {
+        m_linesFile = std::string( aRunDir.ToUTF8() ) + "/.cc-export.json.lines";
+        std::remove( m_linesFile.c_str() );
+    }
+
+    /// "Rendering <n> percent" on aReporter when the percent moved since the last line, and the
+    /// same line appended to the run folder's lines file, closed (whole on disk) before the job
+    /// yields to the browser, where the host reads it.
     void ReportPercent( REPORTER& aReporter )
     {
         if( m_percent < 0 || m_percent == m_reported )
             return;
 
         m_reported = m_percent;
-        aReporter.Report( wxString::Format( wxS( "Rendering %ld percent" ), m_reported ),
-                          RPT_SEVERITY_INFO );
+
+        const wxString line = wxString::Format( wxS( "Rendering %ld percent" ), m_reported );
+        aReporter.Report( line, RPT_SEVERITY_INFO );
+
+        if( m_linesFile.empty() )
+            return;
+
+        if( FILE* file = std::fopen( m_linesFile.c_str(), "ab" ) )
+        {
+            const std::string text = std::string( line.ToUTF8() ) + "\n";
+            std::fwrite( text.data(), 1, text.size(), file );
+            std::fclose( file );
+        }
     }
 
 private:
-    long m_percent = -1;
-    long m_reported = -1;
+    long        m_percent = -1;
+    long        m_reported = -1;
+    std::string m_linesFile;
 };
 } // namespace
 
@@ -1283,6 +1311,11 @@ static int ccJobExportRender( JOB* aJob, REPORTER* aReporter,
     // The raytracer's status lines are read for each pass's percent; its warnings (a model it
     // could not load) reach the job's reporter as KiCad's own.
     CC_RENDER_PASSES passes;
+
+    // The picture's folder is the run folder (the host ignores every output path key, so the
+    // job's file is <run folder>/<board>-<side>.<ext>): each progress line also goes into its
+    // lines file as it is reported, so the page reads the running percent between yields.
+    passes.SetRunFolder( wxFileName( outPath ).GetPath() );
 
     // KiCad's own scene build (the step Redraw takes first while a reload is requested; Reload
     // clears the request, so Redraw does not build it again), then a turn of the browser's
