@@ -24,6 +24,8 @@
  * (host_prompt.h, ask array, modeless) before it shows, takes the answer into its own controls
  * and runs its own TransferDataFromWindow, its own center pickers and its own cancel, and a
  * refusal's sentence is captured in place of wxMessageBox; a plain build is unchanged.
+ * Modified by Circuit Center Inc on 2026-11-19: the array ask's record keys centerX, centerY
+ * and centered take the American spelling.
  */
 
 #include "dialogs/dialog_create_array.h"
@@ -345,7 +347,7 @@ void DIALOG_CREATE_ARRAY::UpdatePickedItem( const EDA_ITEM* aItem )
     Enable( true );
 
 #ifdef __EMSCRIPTEN__
-    // The host's pick ended: its card shows the new centre.
+    // The host's pick ended: its card shows the new center.
     if( m_ccToken )
         CcHostPromptUpdate( m_ccToken, ccRecord() );
 #endif
@@ -363,7 +365,7 @@ void DIALOG_CREATE_ARRAY::UpdatePickedPoint( const std::optional<VECTOR2I>& aPoi
     Enable( true );
 
 #ifdef __EMSCRIPTEN__
-    // The host's pick ended: its card shows the new centre.
+    // The host's pick ended: its card shows the new center.
     if( m_ccToken )
         CcHostPromptUpdate( m_ccToken, ccRecord() );
 #endif
@@ -938,7 +940,7 @@ nlohmann::json DIALOG_CREATE_ARRAY::ccRecord()
     grid["dy"] = pcbIUScale.IUTomm( m_vSpacing.GetIntValue() );
     grid["offsetX"] = pcbIUScale.IUTomm( m_hOffset.GetIntValue() );
     grid["offsetY"] = pcbIUScale.IUTomm( m_vOffset.GetIntValue() );
-    grid["centred"] = m_rbCentreOnSource->GetValue();
+    grid["centered"] = m_rbCentreOnSource->GetValue();
     grid["stagger"] = ccLongOf( *m_entryStagger, 1 );
     grid["staggerRows"] = m_staggerRows->GetValue();
     grid["horizontalThenVertical"] = m_radioBoxGridNumberingAxis->GetSelection() == 0;
@@ -951,8 +953,8 @@ nlohmann::json DIALOG_CREATE_ARRAY::ccRecord()
                                       *m_entryGridSecNumberingStep );
 
     nlohmann::json circular;
-    circular["centreX"] = pcbIUScale.IUTomm( m_hCentre.GetIntValue() );
-    circular["centreY"] = pcbIUScale.IUTomm( m_vCentre.GetIntValue() );
+    circular["centerX"] = pcbIUScale.IUTomm( m_hCentre.GetIntValue() );
+    circular["centerY"] = pcbIUScale.IUTomm( m_vCentre.GetIntValue() );
     circular["angle"] = EDA_UNIT_UTILS::UI::DoubleValueFromString( m_entryCircAngle->GetValue() );
     circular["angleOffset"] =
             EDA_UNIT_UTILS::UI::DoubleValueFromString( m_entryCircOffset->GetValue() );
@@ -1014,7 +1016,7 @@ bool DIALOG_CREATE_ARRAY::ccWriteAnswer( const nlohmann::json& aAnswer, std::str
     {
         std::optional<long>   nx, ny, stagger;
         std::optional<double> dx, dy, offsetX, offsetY;
-        std::optional<bool>   centred, staggerRows, hThenV, reverse, startSpecified, twoD;
+        std::optional<bool>   centered, staggerRows, hThenV, reverse, startSpecified, twoD;
     } g;
 
     auto grid = aAnswer.find( "grid" );
@@ -1024,7 +1026,7 @@ bool DIALOG_CREATE_ARRAY::ccWriteAnswer( const nlohmann::json& aAnswer, std::str
         std::string sub;
 
         if( !grid->is_object()
-                || !ccOnlyKeys( *grid, { "nx", "ny", "dx", "dy", "offsetX", "offsetY", "centred",
+                || !ccOnlyKeys( *grid, { "nx", "ny", "dx", "dy", "offsetX", "offsetY", "centered",
                                          "stagger", "staggerRows", "horizontalThenVertical",
                                          "reverseNumberingAlternate", "numberingStartSpecified",
                                          "numbering2d", "primary", "secondary" }, sub )
@@ -1034,7 +1036,7 @@ bool DIALOG_CREATE_ARRAY::ccWriteAnswer( const nlohmann::json& aAnswer, std::str
                 || !ccReadNumber( *grid, "dy", CC_MAX_MM, g.dy )
                 || !ccReadNumber( *grid, "offsetX", CC_MAX_MM, g.offsetX )
                 || !ccReadNumber( *grid, "offsetY", CC_MAX_MM, g.offsetY )
-                || !ccReadBool( *grid, "centred", g.centred )
+                || !ccReadBool( *grid, "centered", g.centered )
                 || !ccReadBool( *grid, "staggerRows", g.staggerRows )
                 || !ccReadBool( *grid, "horizontalThenVertical", g.hThenV )
                 || !ccReadBool( *grid, "reverseNumberingAlternate", g.reverse )
@@ -1061,7 +1063,7 @@ bool DIALOG_CREATE_ARRAY::ccWriteAnswer( const nlohmann::json& aAnswer, std::str
 
     struct CIRC_IN
     {
-        std::optional<double> centreX, centreY, angle, angleOffset;
+        std::optional<double> centerX, centerY, angle, angleOffset;
         std::optional<long>   count;
         std::optional<bool>   clockwise, rotateItems, startSpecified;
     } c;
@@ -1073,11 +1075,11 @@ bool DIALOG_CREATE_ARRAY::ccWriteAnswer( const nlohmann::json& aAnswer, std::str
         std::string sub;
 
         if( !circular->is_object()
-                || !ccOnlyKeys( *circular, { "centreX", "centreY", "angle", "angleOffset",
+                || !ccOnlyKeys( *circular, { "centerX", "centerY", "angle", "angleOffset",
                                              "clockwise", "count", "rotateItems",
                                              "numberingStartSpecified", "axis" }, sub )
-                || !ccReadNumber( *circular, "centreX", CC_MAX_MM, c.centreX )
-                || !ccReadNumber( *circular, "centreY", CC_MAX_MM, c.centreY )
+                || !ccReadNumber( *circular, "centerX", CC_MAX_MM, c.centerX )
+                || !ccReadNumber( *circular, "centerY", CC_MAX_MM, c.centerY )
                 || !ccReadNumber( *circular, "angle", CC_MAX_DEG, c.angle )
                 || !ccReadNumber( *circular, "angleOffset", CC_MAX_DEG, c.angleOffset )
                 || !ccReadLong( *circular, "count", c.count )
@@ -1126,8 +1128,8 @@ bool DIALOG_CREATE_ARRAY::ccWriteAnswer( const nlohmann::json& aAnswer, std::str
     if( g.offsetY )
         m_vOffset.ChangeValue( pcbIUScale.mmToIU( *g.offsetY ) );
 
-    if( g.centred )
-        ( *g.centred ? m_rbCentreOnSource : m_rbItemsRemainInPlace )->SetValue( true );
+    if( g.centered )
+        ( *g.centered ? m_rbCentreOnSource : m_rbItemsRemainInPlace )->SetValue( true );
 
     if( g.stagger )
         m_entryStagger->ChangeValue( wxString::Format( wxT( "%ld" ), *g.stagger ) );
@@ -1161,11 +1163,11 @@ bool DIALOG_CREATE_ARRAY::ccWriteAnswer( const nlohmann::json& aAnswer, std::str
                          *m_entryGridSecNumberingStep, true );
     }
 
-    if( c.centreX )
-        m_hCentre.ChangeValue( pcbIUScale.mmToIU( *c.centreX ) );
+    if( c.centerX )
+        m_hCentre.ChangeValue( pcbIUScale.mmToIU( *c.centerX ) );
 
-    if( c.centreY )
-        m_vCentre.ChangeValue( pcbIUScale.mmToIU( *c.centreY ) );
+    if( c.centerY )
+        m_vCentre.ChangeValue( pcbIUScale.mmToIU( *c.centerY ) );
 
     if( c.count )
         m_entryCircCount->ChangeValue( wxString::Format( wxT( "%ld" ), *c.count ) );
