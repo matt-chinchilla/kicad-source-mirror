@@ -6,6 +6,11 @@
  * Copyright (C) 2013 Wayne Stambaugh <stambaughw@gmail.com>
  * Copyright The KiCad Developers, see AUTHORS.txt for contributors.
  *
+ * Modified by Circuit Center Inc on 2026-11-19: under __EMSCRIPTEN__ the board editor's group
+ * tool asks the WebAssembly editor's host (window.kicadHostBoardItem, kind group) before KiCad's
+ * Group Properties dialog on every road to it (E, a run of the action by name, as the canvas
+ * menu's item does, any other edit request), as E on a group asks.
+ *
  * This program is free software: you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
  * Free Software Foundation, either version 3 of the License, or (at your
@@ -98,6 +103,9 @@
 #include <tools/pcb_group_tool.h>
 #include <tools/generator_tool.h>
 #include <tools/drc_tool.h>
+#ifdef __EMSCRIPTEN__
+#include <tools/board_item_host.h>
+#endif
 #include <tools/drc_rule_editor_tool.h>
 #include <tools/global_edit_tool.h>
 #include <tools/convert_tool.h>
@@ -938,6 +946,31 @@ SELECTION& PCB_EDIT_FRAME::GetCurrentSelection()
 }
 
 
+#ifdef __EMSCRIPTEN__
+/**
+ * The board editor's group tool in the WebAssembly editor: KiCad's Group Properties dialog asks
+ * the host first on every road to it (CcHostGroupProperties, board_item_host.h).
+ */
+class CC_HOST_PCB_GROUP_TOOL : public PCB_GROUP_TOOL
+{
+public:
+    int GroupProperties( const TOOL_EVENT& aEvent ) override
+    {
+        return CcHostGroupProperties(
+                aEvent, m_selectionTool, false,
+                [this]( EDA_ITEM* aItem ) -> EDA_GROUP*
+                {
+                    return getGroupFromItem( aItem );
+                },
+                [this]( const TOOL_EVENT& aWithGroup ) -> int
+                {
+                    return PCB_GROUP_TOOL::GroupProperties( aWithGroup );
+                } );
+    }
+};
+#endif
+
+
 void PCB_EDIT_FRAME::setupTools()
 {
     // Create the manager and dispatcher & route draw panel events to the dispatcher
@@ -974,7 +1007,11 @@ void PCB_EDIT_FRAME::setupTools()
     m_toolManager->RegisterTool( new DRC_TOOL );
     m_toolManager->RegisterTool( new PCB_VIEWER_TOOLS );
     m_toolManager->RegisterTool( new CONVERT_TOOL );
+#ifdef __EMSCRIPTEN__
+    m_toolManager->RegisterTool( new CC_HOST_PCB_GROUP_TOOL );
+#else
     m_toolManager->RegisterTool( new PCB_GROUP_TOOL );
+#endif
     m_toolManager->RegisterTool( new GENERATOR_TOOL );
 #ifdef KICAD_SCRIPTING
     m_toolManager->RegisterTool( new SCRIPTING_TOOL );

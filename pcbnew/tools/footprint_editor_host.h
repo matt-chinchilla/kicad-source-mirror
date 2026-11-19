@@ -15,7 +15,7 @@
  * Asks the WebAssembly editor's host whether it takes this request of the footprint editor in
  * its own window (engine run 15, the island's ev.fpedit): window.kicadHostFpEdit.onRequest(json)
  * with {ask, uuid, isNew}. ask is an item kind ("pad", "field", "text", "textbox", "shape",
- * "dimension", "zone", "table", "barcode", "image", "point") or a frame request ("footprint",
+ * "dimension", "zone", "table", "barcode", "image", "point", "group") or a frame request ("footprint",
  * "padDefaults", "wizard", "newFootprint", "rename", "cleanup", "pushPad", "enumerate",
  * "padTable", "graphics"); uuid is the item's ("" for a frame request and a new picture).
  * A truthy answer takes the request and KiCad's dialog does not open; no listener, a falsy
