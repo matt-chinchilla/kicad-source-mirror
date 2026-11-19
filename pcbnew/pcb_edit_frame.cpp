@@ -6,10 +6,11 @@
  * Copyright (C) 2013 Wayne Stambaugh <stambaughw@gmail.com>
  * Copyright The KiCad Developers, see AUTHORS.txt for contributors.
  *
- * Modified by Circuit Center Inc on 2026-11-19: under __EMSCRIPTEN__ the board editor's group
- * tool asks the WebAssembly editor's host (window.kicadHostBoardItem, kind group) before KiCad's
- * Group Properties dialog on every road to it (E, a run of the action by name, as the canvas
- * menu's item does, any other edit request), as E on a group asks.
+ * Modified by Circuit Center Inc on 2026-11-19: under __EMSCRIPTEN__ the board editor's own group
+ * tool (CC_HOST_BOARD_GROUP_TOOL, a name of its own in the merged image) asks the WebAssembly
+ * editor's host (window.kicadHostBoardItem, kind group) before KiCad's Group Properties dialog on
+ * every road to it (E, a run of the action by name, as the canvas menu's item does, any other edit
+ * request), as E on a group asks.
  *
  * This program is free software: you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
