@@ -27,6 +27,10 @@
  * the footprint editor asks the WebAssembly editor's host (window.kicadHostFpEdit) before
  * KiCad's item dialogs, by item kind, and in the board editor asks it
  * (window.kicadHostBoardItem) for the board items run A's ask leaves to KiCad's dialogs.
+ * Modified by Circuit Center Inc on 2026-11-19: under __EMSCRIPTEN__ the footprint editor asks
+ * the host for a group too (window.kicadHostFpEdit, ask group), and the item the host left to
+ * KiCad is named while KiCad's dialog for it opens, so the group tool of either editor, which now
+ * asks the host on every road to the group dialog, does not ask again after E.
  */
 
 #include <macros.h>
@@ -69,6 +73,7 @@
 #include <json_common.h>
 #include <tools/footprint_editor_host.h>
 #include <tools/board_item_host.h>
+#include <scoped_set_reset.h>
 #endif
 #include <tools/pad_tool.h>
 #include <view/view_controls.h>
@@ -2410,6 +2415,7 @@ static BOARD_ITEM* fpEditAskSubject( BOARD_ITEM* aItem, const char*& aAsk )
     case PCB_BARCODE_T:         aAsk = "barcode";   return aItem;
     case PCB_REFERENCE_IMAGE_T: aAsk = "image";     return aItem;
     case PCB_POINT_T:           aAsk = "point";     return aItem;
+    case PCB_GROUP_T:           aAsk = "group";     return aItem;
 
     case PCB_DIM_ALIGNED_T:
     case PCB_DIM_LEADER_T:
@@ -2510,6 +2516,9 @@ int EDIT_TOOL::Properties( const TOOL_EVENT& aEvent )
             } );
 
 #ifdef __EMSCRIPTEN__
+    // The item the board item ask below named and the host left to KiCad's dialog.
+    const KIID* leftToKiCad = nullptr;
+
     // The in-browser editor's host edits one footprint (or its field or text), track,
     // arc, via, copper zone, board text or check mark in its own window: asked first,
     // a truthy answer opens no KiCad dialog and leaves that item (a field or text
@@ -2549,6 +2558,8 @@ int EDIT_TOOL::Properties( const TOOL_EVENT& aEvent )
                 m_selectionTool->GetSelection().SetIsHover( false );
                 return 0;
             }
+
+            leftToKiCad = &selection.Front()->m_Uuid;
         }
     }
 
@@ -2575,6 +2586,9 @@ int EDIT_TOOL::Properties( const TOOL_EVENT& aEvent )
             m_selectionTool->GetSelection().SetIsHover( false );
             return 0;
         }
+
+        if( asked )
+            leftToKiCad = &asked->m_Uuid;
     }
 #endif
 
@@ -2610,7 +2624,14 @@ int EDIT_TOOL::Properties( const TOOL_EVENT& aEvent )
         BOARD_ITEM* item = static_cast<BOARD_ITEM*>( selection.Front() );
 
         // Do not handle undo buffer, it is done by the properties dialogs
+#ifdef __EMSCRIPTEN__
+        // The host was asked for this item above and left it to KiCad: the dialog's own entry
+        // point (a group's GroupProperties) opens KiCad's dialog without a second ask.
+        SCOPED_SET_RESET<const KIID*> named( CcBoardItemLeftToKiCad(), leftToKiCad );
         editFrame->OnEditItemRequest( item );
+#else
+        editFrame->OnEditItemRequest( item );
+#endif
 
         // Notify other tools of the changes
         m_toolMgr->ProcessEvent( EVENTS::SelectedItemsModified );
