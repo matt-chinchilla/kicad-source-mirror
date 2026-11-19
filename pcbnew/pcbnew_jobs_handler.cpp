@@ -16,6 +16,8 @@
  * Modified by Circuit Center Inc on 2026-11-18: the WebAssembly render job reports the percent of
  * the pass that finished the tracing, as KiCad's own reporter prints every pass's, and names the
  * picture's own size in pixels (KiCad's raytracer rounds the size asked down to whole blocks).
+ * Modified by Circuit Center Inc on 2026-11-18: in the WebAssembly build the 3D export names its
+ * default file for the compressed STEP format (.stpz), which KiCad's default name switch left out.
  *
  * This program is free software: you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -603,6 +605,9 @@ int PCBNEW_JOBS_HANDLER::JobExportStep( JOB* aJob )
         {
         case JOB_EXPORT_PCB_3D::FORMAT::VRML: fn.SetExt( FILEEXT::VrmlFileExtension );       break;
         case JOB_EXPORT_PCB_3D::FORMAT::STEP: fn.SetExt( FILEEXT::StepFileExtension );       break;
+#ifdef __EMSCRIPTEN__
+        case JOB_EXPORT_PCB_3D::FORMAT::STEPZ: fn.SetExt( FILEEXT::StepZFileAbrvExtension ); break;
+#endif
         case JOB_EXPORT_PCB_3D::FORMAT::BREP: fn.SetExt( FILEEXT::BrepFileExtension );       break;
         case JOB_EXPORT_PCB_3D::FORMAT::XAO:  fn.SetExt( FILEEXT::XaoFileExtension );        break;
         case JOB_EXPORT_PCB_3D::FORMAT::GLB:  fn.SetExt( FILEEXT::GltfBinaryFileExtension ); break;
