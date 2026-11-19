@@ -1236,7 +1236,7 @@ void FOOTPRINT_EDIT_FRAME::OnDisplayOptionsChanged()
  * The footprint editor's group tool in the WebAssembly editor: KiCad's Group Properties dialog asks
  * the host first on every road to it (CcHostGroupProperties, board_item_host.h).
  */
-class CC_HOST_PCB_GROUP_TOOL : public PCB_GROUP_TOOL
+class CC_HOST_FPEDIT_GROUP_TOOL : public PCB_GROUP_TOOL
 {
 public:
     int GroupProperties( const TOOL_EVENT& aEvent ) override
@@ -1285,7 +1285,7 @@ void FOOTPRINT_EDIT_FRAME::setupTools()
     m_toolManager->RegisterTool( new ARRAY_TOOL );
     m_toolManager->RegisterTool( new PCB_VIEWER_TOOLS );
 #ifdef __EMSCRIPTEN__
-    m_toolManager->RegisterTool( new CC_HOST_PCB_GROUP_TOOL );
+    m_toolManager->RegisterTool( new CC_HOST_FPEDIT_GROUP_TOOL );
 #else
     m_toolManager->RegisterTool( new PCB_GROUP_TOOL );
 #endif
