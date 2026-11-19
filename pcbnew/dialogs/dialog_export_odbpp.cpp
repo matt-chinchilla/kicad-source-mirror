@@ -15,6 +15,10 @@
  *
  * You should have received a copy of the GNU General Public License along
  * with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * Modified by Circuit Center Inc on 2026-11-19: in the WebAssembly build the ODB++ save on
+ * KiCad's thread pool logs as its caller does, so a run that holds wxLogNull is not followed
+ * by a message box over the editor.
  */
 
 #include "dialogs/dialog_export_odbpp.h"
@@ -52,6 +56,10 @@
 #include <pcb_io/pcb_io_mgr.h>
 #include <kiplatform/io.h>
 #include <locale_io.h>
+
+#ifdef __EMSCRIPTEN__
+#include <wx/log.h>
+#endif
 
 
 
@@ -389,9 +397,27 @@ void DIALOG_EXPORT_ODBPP::GenerateODBPPFiles( const JOB_EXPORT_PCB_ODB& aJob, BO
     props["units"] = aJob.m_units == JOB_EXPORT_PCB_ODB::ODB_UNITS::MM ? "mm" : "inch";
     props["sigfig"] = wxString::Format( "%d", aJob.m_precision );
 
+#ifdef __EMSCRIPTEN__
+    // A wxLogNull held by the caller (every output run of the engine holds one) reaches only
+    // the calling thread. wx keeps what a pool thread logs and shows it from the main thread
+    // at its next idle, after the run has ended, as a message box over the editor (a board
+    // with no Edge.Cuts outline logs "Failed to get board outline" from the profile writer);
+    // that box held every later output of the session. The save logs as its caller does.
+    const bool callerLogs = wxLog::IsEnabled();
+#endif
+
     auto saveFile =
             [&]() -> bool
             {
+#ifdef __EMSCRIPTEN__
+                struct LOG_AS_CALLER
+                {
+                    explicit LOG_AS_CALLER( bool aOn ) : m_was( wxLog::EnableLogging( aOn ) ) {}
+                    ~LOG_AS_CALLER() { wxLog::EnableLogging( m_was ); }
+                    bool m_was;
+                } logAsCaller( callerLogs );
+#endif
+
                 try
                 {
                     IO_RELEASER<PCB_IO> pi( PCB_IO_MGR::FindPlugin( PCB_IO_MGR::ODBPP ) );

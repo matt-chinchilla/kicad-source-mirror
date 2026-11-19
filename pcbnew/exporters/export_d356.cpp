@@ -20,6 +20,9 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-19: in the WebAssembly build a via's record
+ * starts from a cleared soldermask field, so its S field is the tented sides alone.
  */
 
 /**
@@ -226,6 +229,13 @@ static void build_via_testpoints( BOARD *aPcb, std::vector <D356_RECORD>& aRecor
 
             rk.y_size = 0; // Round so height = 0
             rk.rotation = 0;
+
+#ifdef __EMSCRIPTEN__
+            // D356_RECORD has no initializers and a via's soldermask is only ORed into below,
+            // so the field kept whatever the stack held: the WebAssembly build wrote
+            // S-2147483613 where kicad-cli writes S3 for a via tented on both sides.
+            rk.soldermask = 0;
+#endif
 
             if( via->IsTented( F_Mask ) )
                 rk.soldermask |= 1;
