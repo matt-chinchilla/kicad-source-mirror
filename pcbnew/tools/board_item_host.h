@@ -65,9 +65,11 @@ inline const KIID*& CcBoardItemLeftToKiCad()
 }
 
 /**
- * The body of the WebAssembly editor's group tool (CC_HOST_PCB_GROUP_TOOL in pcb_edit_frame.cpp
- * and footprint_edit_frame.cpp, each over PCB_GROUP_TOOL, whose header has no include guard and so
- * is not included here): every road to KiCad's Group Properties dialog (E through
+ * The body of the WebAssembly editor's group tools (CC_HOST_BOARD_GROUP_TOOL in pcb_edit_frame.cpp,
+ * CC_HOST_FPEDIT_GROUP_TOOL in footprint_edit_frame.cpp, each over PCB_GROUP_TOOL, whose header has
+ * no include guard and so is not included here; the two names differ because both frame files link
+ * into one image, and one class name with two inline bodies would leave the linker one of them for
+ * both editors): every road to KiCad's Group Properties dialog (E through
  * OnEditItemRequest, a run of common.Groups.groupProperties by name as the canvas menu's item
  * sends it, any other edit request of a group) asks the host first with the ask E makes in that
  * editor, the group's uuid and isNew false: window.kicadHostBoardItem kind "group" in the board

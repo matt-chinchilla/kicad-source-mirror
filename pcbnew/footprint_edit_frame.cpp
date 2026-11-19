@@ -6,10 +6,11 @@
  * Copyright (C) 2015-2016 Wayne Stambaugh <stambaughw@gmail.com>
  * Copyright The KiCad Developers, see AUTHORS.txt for contributors.
  *
- * Modified by Circuit Center Inc on 2026-11-19: under __EMSCRIPTEN__ the footprint editor's group
- * tool asks the WebAssembly editor's host (window.kicadHostFpEdit, ask group) before KiCad's
- * Group Properties dialog on every road to it (E, a run of the action by name, as the canvas
- * menu's item does, any other edit request), as E on a group asks.
+ * Modified by Circuit Center Inc on 2026-11-19: under __EMSCRIPTEN__ the footprint editor's own
+ * group tool (CC_HOST_FPEDIT_GROUP_TOOL, a name of its own in the merged image) asks the
+ * WebAssembly editor's host (window.kicadHostFpEdit, ask group) before KiCad's Group Properties
+ * dialog on every road to it (E, a run of the action by name, as the canvas menu's item does, any
+ * other edit request), as E on a group asks.
  *
  * This program is free software: you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -1236,7 +1237,7 @@ void FOOTPRINT_EDIT_FRAME::OnDisplayOptionsChanged()
  * The footprint editor's group tool in the WebAssembly editor: KiCad's Group Properties dialog asks
  * the host first on every road to it (CcHostGroupProperties, board_item_host.h).
  */
-class CC_HOST_PCB_GROUP_TOOL : public PCB_GROUP_TOOL
+class CC_HOST_FPEDIT_GROUP_TOOL : public PCB_GROUP_TOOL
 {
 public:
     int GroupProperties( const TOOL_EVENT& aEvent ) override
@@ -1285,7 +1286,7 @@ void FOOTPRINT_EDIT_FRAME::setupTools()
     m_toolManager->RegisterTool( new ARRAY_TOOL );
     m_toolManager->RegisterTool( new PCB_VIEWER_TOOLS );
 #ifdef __EMSCRIPTEN__
-    m_toolManager->RegisterTool( new CC_HOST_PCB_GROUP_TOOL );
+    m_toolManager->RegisterTool( new CC_HOST_FPEDIT_GROUP_TOOL );
 #else
     m_toolManager->RegisterTool( new PCB_GROUP_TOOL );
 #endif
