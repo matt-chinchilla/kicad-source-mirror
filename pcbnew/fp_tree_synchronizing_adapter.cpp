@@ -5,6 +5,10 @@
  * Copyright The KiCad Developers, see AUTHORS.txt for contributors.
  * @author Maciej Suminski <maciej.suminski@cern.ch>
  *
+ * Modified by Circuit Center Inc on 2026-11-19: under __EMSCRIPTEN__ Sync() adds to the tree only
+ * the project's own footprint libraries (rows whose uri starts /mnt/pcbjam/prj.), never every
+ * library of the mirror.
+ *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
  * as published by the Free Software Foundation; either version 3
@@ -127,6 +131,16 @@ void FP_TREE_SYNCHRONIZING_ADAPTER::Sync( FOOTPRINT_LIBRARY_ADAPTER* aLibs )
 
         if( !optRow.has_value() || ( *optRow )->Disabled() || ( *optRow )->Hidden() )
             continue;
+
+#ifdef __EMSCRIPTEN__
+        // The WebAssembly editor's tree holds the project's own libraries only (their rows' uri
+        // starts /mnt/pcbjam/prj.), as the symbol editor's does: the tree is never shown, the
+        // page opens a footprint by its text or its name, and GetFootprints() below reads and
+        // parses a whole library and keeps every footprint of it for the session (every library
+        // of the mirror came to about 2.3 GB of engine heap at each footprint editor boot).
+        if( !( *optRow )->URI().StartsWith( wxS( "/mnt/pcbjam/prj." ) ) )
+            continue;
+#endif
 
         bool pinned = alg::contains( cfg->m_Session.pinned_fp_libs, libName )
                         || alg::contains( project.m_PinnedFootprintLibs, libName );

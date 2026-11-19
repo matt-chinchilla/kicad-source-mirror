@@ -11,6 +11,9 @@
  * WebAssembly editor's host (window.kicadHostFpEdit, ask group) before KiCad's Group Properties
  * dialog on every road to it (E, a run of the action by name, as the canvas menu's item does, any
  * other edit request), as E on a group asks.
+ * Modified by Circuit Center Inc on 2026-11-19: under __EMSCRIPTEN__ the library tree is built by
+ * FP_TREE_SYNCHRONIZING_ADAPTER::Sync, which holds only the project's own footprint libraries, in
+ * place of AddLibraries, which read every footprint of every library of the mirror at each boot.
  *
  * This program is free software: you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -1175,7 +1178,18 @@ void FOOTPRINT_EDIT_FRAME::initLibraryTree()
     m_adapter = FP_TREE_SYNCHRONIZING_ADAPTER::Create( this, footprints );
     auto adapter = static_cast<FP_TREE_SYNCHRONIZING_ADAPTER*>( m_adapter.get() );
 
+#ifdef __EMSCRIPTEN__
+    // The WebAssembly editor never shows this tree (the page has its own footprint browser over
+    // its own index) and opens a footprint by its text or by its name, never from the tree.
+    // AddLibraries() asks GetFootprints() of EVERY loaded library, and each one reads its whole
+    // library through the host (one crossing for all its bodies) and keeps a parsed copy of every
+    // footprint in PreloadedFootprints for the session: with the mirror served, about 2.3 GB of
+    // engine heap within seconds of the frame's start. Sync() on the empty tree adds the same
+    // nodes AddLibraries() would, limited to the project's own libraries.
+    adapter->Sync( footprints );
+#else
     adapter->AddLibraries( this );
+#endif
 }
 
 
