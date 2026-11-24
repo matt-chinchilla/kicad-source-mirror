@@ -22,6 +22,10 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-23: swapData puts the board's item-by-id
+ * cache back on the footprint's live children after the swap (an undo left every child
+ * uuid naming the object now held in the undo list, so a read by uuid saw the edit).
  */
 
 #include "footprint.h"
@@ -4233,6 +4237,35 @@ void FOOTPRINT::swapData( BOARD_ITEM* aImage )
                 child->SetParent( image );
             },
             RECURSE_MODE::NO_RECURSE );
+
+#ifdef __EMSCRIPTEN__
+    // std::swap moves the children through a temporary and re-adds each one with
+    // FOOTPRINT::Add, whose CacheItemById is an insert: the first object stored under a
+    // uuid stays. So after an undo or a redo every child uuid still names the object that
+    // was live before the swap, which is now held by the image in the undo list. Drop
+    // every cache entry that names a child of the image, then cache the live children.
+    if( BOARD* board = GetBoard() )
+    {
+        image->RunOnChildren(
+                [&]( BOARD_ITEM* child )
+                {
+                    const auto& cache = board->GetItemByIdCache();
+                    auto        it = cache.find( child->m_Uuid );
+
+                    if( it != cache.end() && it->second == child )
+                        board->UncacheItemById( child->m_Uuid );
+                },
+                RECURSE_MODE::NO_RECURSE );
+
+        RunOnChildren(
+                [&]( BOARD_ITEM* child )
+                {
+                    board->UncacheItemById( child->m_Uuid );
+                    board->CacheItemById( child );
+                },
+                RECURSE_MODE::NO_RECURSE );
+    }
+#endif
 }
 
 
