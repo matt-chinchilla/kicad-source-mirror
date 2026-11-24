@@ -5,6 +5,11 @@
  * Copyright The KiCad Developers, see AUTHORS.txt for contributors.
  * @author Maciej Suminski <maciej.suminski@cern.ch>
  *
+ * Modified by Circuit Center Inc on 2026-11-23: under __EMSCRIPTEN__ CcActionCheck
+ * (include/tool/cc_action_state.h) reads one action's checked state for the WebAssembly
+ * editor's host in this translation unit, by the condition map and by KiCad's own UI update
+ * event, and names every step it took.
+ *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
  * as published by the Free Software Foundation; either version 2
@@ -36,6 +41,11 @@
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #include <json_common.h>
+#include <tool/cc_action_state.h>
+#include <tool/selection_conditions.h>
+#include <tool/tools_holder.h>
+#include <wx/event.h>
+#include <wx/window.h>
 #endif
 
 
@@ -176,6 +186,91 @@ bool hostHoldsAction( const std::string& aActionName )
 static bool hostHoldsAction( const TOOL_ACTION& aAction )
 {
     return hostHoldsAction( aAction.GetName() );
+}
+
+
+// The checked state of aName in the frame aFrame whose tool manager is aMgr, by both roads of
+// cc_action_state.h. A read: nothing is queued and no action runs.
+CC_ACTION_CHECK CcActionCheck( TOOL_MANAGER* aMgr, wxWindow* aFrame, const std::string& aName )
+{
+    CC_ACTION_CHECK check;
+    ACTION_MANAGER* mgr = aMgr ? aMgr->GetActionManager() : nullptr;
+
+    if( !mgr )
+        return check;
+
+    TOOL_ACTION* action = mgr->FindAction( aName );
+
+    if( !action )
+        return check;
+
+    check.found = true;
+    check.id = action->GetId();
+    check.uiId = action->GetUIId();
+
+    for( const auto& [name, each] : mgr->GetActions() )
+    {
+        if( each && mgr->GetCondition( *each ) )
+            check.conditions++;
+    }
+
+    for( TOOL_ACTION* each : ACTION_MANAGER::GetActionList() )
+    {
+        if( !each || each->GetName() != aName )
+            continue;
+
+        check.twins++;
+
+        if( each != action && mgr->GetCondition( *each ) )
+            check.twinCondition = true;
+    }
+
+    // Road (a): the condition the frame registered with SetConditions.
+    if( const ACTION_CONDITIONS* cond = mgr->GetCondition( *action ) )
+    {
+        check.condition = true;
+        check.checkSet = static_cast<bool>( cond->checkCondition );
+
+        using CONDITION_FN = bool ( * )( const SELECTION& );
+        const CONDITION_FN* plain = cond->checkCondition.target<CONDITION_FN>();
+
+        check.showNever = plain && *plain == &SELECTION_CONDITIONS::ShowNever;
+
+        TOOLS_HOLDER* holder = aMgr->GetToolHolder();
+
+        if( check.checkSet && !check.showNever && holder )
+        {
+            try
+            {
+                check.value = cond->checkCondition( holder->GetCurrentSelection() ) ? 1 : 0;
+            }
+            catch( ... )
+            {
+                check.threw = true;
+            }
+        }
+    }
+
+    // Road (b): KiCad's own UI update event for the action's UI id, as a menu or toolbar item
+    // of the frame asks (EDA_BASE_FRAME::onUpdateUI, HandleUpdateUIEvent).
+    if( aFrame )
+    {
+        try
+        {
+            wxUpdateUIEvent evt( action->GetUIId() );
+            evt.SetEventObject( aFrame );
+            aFrame->ProcessWindowEvent( evt );
+
+            if( evt.GetSetChecked() )
+                check.uiValue = evt.GetChecked() ? 1 : 0;
+        }
+        catch( ... )
+        {
+            check.threw = true;
+        }
+    }
+
+    return check;
 }
 #endif
 
