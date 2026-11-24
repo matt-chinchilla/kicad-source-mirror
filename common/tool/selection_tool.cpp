@@ -19,6 +19,10 @@
  * or you may search the http://www.gnu.org website for the version 3 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-23: doSelectionMenu marks its clarify list so the
+ * in-browser editor's host is told which menu is that list (tool/cc_clarify_menu.h,
+ * WebAssembly build only).
  */
 
 #include <bitmaps.h>
@@ -30,6 +34,10 @@
 #include <view/view.h>
 #include <eda_draw_frame.h>
 #include <eda_item.h>
+
+#ifdef __EMSCRIPTEN__
+#include <tool/cc_clarify_menu.h>
+#endif
 
 
 SELECTION_TOOL::SELECTION_TOOL( const std::string& aName ) :
@@ -347,6 +355,11 @@ bool SELECTION_TOOL::doSelectionMenu( COLLECTOR* aCollector )
         {
             menu.DisplayTitle( false );
         }
+
+#ifdef __EMSCRIPTEN__
+        // This menu is the clarify list until it goes out of scope with this pass of the loop.
+        CC_CLARIFY_MENU_MARK ccClarifyMark( &menu );
+#endif
 
         SetContextMenu( &menu, CMENU_NOW );
 

@@ -26,6 +26,9 @@
  * Modified by Circuit Center Inc on 2026-11-18: DispatchContextMenu offers the context menu to
  * the in-browser editor's host (tool/host_context_menu.h) before KiCad's own popup, which shows
  * only when the host does not take it (WebAssembly build only).
+ * Modified by Circuit Center Inc on 2026-11-23: the host is told clarify only for the menu
+ * SELECTION_TOOL::doSelectionMenu marked as its clarify list (tool/cc_clarify_menu.h), not for
+ * every menu shown at once (WebAssembly build only).
  */
 
 #include <core/kicad_algo.h>
@@ -58,6 +61,7 @@
 
 #ifdef __EMSCRIPTEN__
 #include <tool/host_context_menu.h>
+#include <tool/cc_clarify_menu.h>
 #endif
 
 /// Struct describing the current execution state of a TOOL
@@ -980,7 +984,9 @@ void TOOL_MANAGER::DispatchContextMenu( const TOOL_EVENT& aEvent )
         ACTION_MENU* m = st->contextMenu;
 
 #ifdef __EMSCRIPTEN__
-        const bool clarify = st->contextMenuTrigger == CMENU_NOW;
+        // CMENU_NOW also shows KiCad's ordinary menu (TOOL_MENU::ShowContextMenu): only the
+        // list doSelectionMenu marked is the clarify list.
+        const bool clarify = st->contextMenuTrigger == CMENU_NOW && CcIsClarifyMenu( m );
 #endif
 
         if( st->contextMenuTrigger == CMENU_NOW )
