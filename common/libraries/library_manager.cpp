@@ -16,6 +16,10 @@
  *
  * You should have received a copy of the GNU General Public License along
  * with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * Modified by Circuit Center Inc on 2026-11-23: in the browser build loadTables logs no warning
+ * for a library table it cannot read (the log is a window there) and keeps the fact for the
+ * page in libraries/cc_library_table_problems.h (WebAssembly build only).
  */
 
 #include <chrono>
@@ -41,6 +45,10 @@ using namespace std::chrono_literals;
 #include <settings/settings_manager.h>
 #include <wx/dir.h>
 #include <wx/log.h>
+
+#ifdef __EMSCRIPTEN__
+#include <libraries/cc_library_table_problems.h>
+#endif
 
 struct LIBRARY_MANAGER_INTERNALS
 {
@@ -91,6 +99,11 @@ void LIBRARY_MANAGER::loadTables( const wxString& aTablePath, LIBRARY_TABLE_SCOP
 
         wxFileName fn( aTablePath, tableFileName( type ) );
 
+#ifdef __EMSCRIPTEN__
+        const std::string ccPath = fn.GetFullPath().ToStdString( wxConvUTF8 );
+        CcLibraryTableForget( ccPath );
+#endif
+
         if( fn.IsFileReadable() )
         {
             std::unique_ptr<LIBRARY_TABLE> table = std::make_unique<LIBRARY_TABLE>( fn, aScope );
@@ -99,10 +112,32 @@ void LIBRARY_MANAGER::loadTables( const wxString& aTablePath, LIBRARY_TABLE_SCOP
             {
                 auto actualName = magic_enum::enum_name( table->Type() );
                 auto expectedName = magic_enum::enum_name( type );
+#ifdef __EMSCRIPTEN__
+                // No log here: the browser shows a logged warning as a window that holds the
+                // frame. The page reads the fact through kicadLibraryTableProblems.
+                wxString ccMessage = table->ErrorDescription();
+
+                if( ccMessage.IsEmpty() )
+                {
+                    ccMessage = wxString::Format( wxS( "Library table '%s' has type %s but "
+                                                       "expected %s; skipping" ),
+                                                  fn.GetFullPath(),
+                                                  wxString( actualName.data(), actualName.size() ),
+                                                  wxString( expectedName.data(),
+                                                            expectedName.size() ) );
+                }
+
+                const char* ccKind = type == LIBRARY_TABLE_TYPE::SYMBOL      ? "symbol"
+                                     : type == LIBRARY_TABLE_TYPE::FOOTPRINT ? "footprint"
+                                                                             : "designBlock";
+
+                CcLibraryTableProblem( ccPath, ccKind, ccMessage.ToStdString( wxConvUTF8 ) );
+#else
                 wxLogWarning( wxS( "Library table '%s' has type %s but expected %s; skipping" ),
                               fn.GetFullPath(),
                               wxString( actualName.data(), actualName.size() ),
                               wxString( expectedName.data(), expectedName.size() ) );
+#endif
                 continue;
             }
 
