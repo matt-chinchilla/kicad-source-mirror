@@ -20,6 +20,11 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-23: under __EMSCRIPTEN__ Text, Line and Rectangle
+ * are not primed at the pointer when the WebAssembly editor's host takes the drawing sheet
+ * editor's items, and a placed item's undo copy is taken before the item is added, so canceling
+ * the placement or one Undo after it removes the item.
  */
 
 #include <class_draw_panel_gal.h>
@@ -35,6 +40,26 @@
 #include "tools/pl_selection_tool.h"
 #include "tools/pl_drawing_tools.h"
 #include "pgm_base.h"
+
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+
+
+// True when the WebAssembly editor's host takes the drawing sheet editor's items (engine build
+// T17): window.kicadHostDsEdit.onRequest is a function. Only read, never called. Text, Line and
+// Rectangle are then not primed at the pointer when the tool starts, so no item is made before
+// the reader's own click. Pictures keep KiCad's prime: their first press asks for a file and
+// places nothing. With no host the tools prime as KiCad does.
+static bool ccHostTakesDsItems()
+{
+    int taken = EM_ASM_INT( {
+        var host = window.kicadHostDsEdit;
+        return ( host && typeof host.onRequest === 'function' ) ? 1 : 0;
+    } );
+
+    return taken != 0;
+}
+#endif
 
 PL_DRAWING_TOOLS::PL_DRAWING_TOOLS() :
         TOOL_INTERACTIVE( "plEditor.InteractiveDrawing" ),
@@ -116,7 +141,12 @@ int PL_DRAWING_TOOLS::PlaceItem( const TOOL_EVENT& aEvent )
     // Set initial cursor
     setCursor();
 
+#ifdef __EMSCRIPTEN__
+    // The host takes the new text: no prime, the reader's own click places it.
+    if( aEvent.HasPosition() && !( isText && ccHostTakesDsItems() ) )
+#else
     if( aEvent.HasPosition() )
+#endif
         m_toolMgr->PrimeTool( aEvent.Position() );
 
     // Main loop: keep receiving events
@@ -159,11 +189,26 @@ int PL_DRAWING_TOOLS::PlaceItem( const TOOL_EVENT& aEvent )
 
             if( !item )
             {
+#ifdef __EMSCRIPTEN__
+                // The undo copy is the sheet BEFORE the add, so the cleanup's rollback (Esc,
+                // another tool) and one Undo after the placement both remove the new item.
+                m_frame->SaveCopyInUndoList();
+
+                DS_DATA_ITEM* dataItem = m_frame->AddDrawingSheetItem( type );
+
+                // A canceled picture added nothing: pop the copy taken for it.
+                if( !dataItem )
+                    m_frame->RollbackFromUndo();
+
+                if( dataItem )  // dataItem = nullptr can happens if the command was cancelled
+                {
+#else
                 DS_DATA_ITEM* dataItem = m_frame->AddDrawingSheetItem( type );
 
                 if( dataItem )  // dataItem = nullptr can happens if the command was cancelled
                 {
                     m_frame->SaveCopyInUndoList();
+#endif
 
                     m_toolMgr->RunAction( ACTIONS::selectionClear );
 
@@ -256,7 +301,13 @@ int PL_DRAWING_TOOLS::DrawShape( const TOOL_EVENT& aEvent )
     // Set initial cursor
     setCursor();
 
+#ifdef __EMSCRIPTEN__
+    // The host takes the new line or rectangle: no prime, the reader's own two clicks are its
+    // ends.
+    if( aEvent.HasPosition() && !ccHostTakesDsItems() )
+#else
     if( aEvent.HasPosition() )
+#endif
         m_toolMgr->PrimeTool( aEvent.Position() );
 
     // Main loop: keep receiving events
