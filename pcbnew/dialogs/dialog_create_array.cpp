@@ -28,6 +28,8 @@
  * and centered take the American spelling.
  * Modified by Circuit Center Inc on 2026-11-19: an accepted host answer closes the dialog from
  * the frame's event loop, so the array is made where its commit may wait.
+ * Modified by Circuit Center Inc on 2026-11-23: a host pick starts KiCad's picker from the
+ * frame's event loop, never inside the plain call that asked for it.
  */
 
 #include "dialogs/dialog_create_array.h"
@@ -1264,10 +1266,16 @@ bool DIALOG_CREATE_ARRAY::CcPick( const std::string& aKind )
         return false;
 
     // The dialog's own picker: KiCad's PCB_PICKER_TOOL; its result arrives in
-    // UpdatePickedItem or UpdatePickedPoint, which sends the host the new record.
-    wxCommandEvent event( wxEVT_BUTTON, button->GetId() );
-    event.SetEventObject( button );
-    OnSelectCenterButton( event );
+    // UpdatePickedItem or UpdatePickedPoint, which sends the host the new record. The picker
+    // tool runs from the frame's event loop: the plain kicadPromptPick call it is asked from
+    // cannot wait, and the tool's loop may. A dialog destroyed before then drops its pending
+    // calls, so a pick never runs on a gone dialog.
+    CallAfter( [this, button]()
+               {
+                   wxCommandEvent event( wxEVT_BUTTON, button->GetId() );
+                   event.SetEventObject( button );
+                   OnSelectCenterButton( event );
+               } );
     return true;
 }
 

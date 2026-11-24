@@ -26,6 +26,8 @@
  * answers; a plain build is unchanged.
  * Modified by Circuit Center Inc on 2026-11-19: an accepted host answer is checked at once and
  * its move runs from the frame's event loop, where the commit may wait.
+ * Modified by Circuit Center Inc on 2026-11-23: a host pick starts KiCad's picker from the
+ * frame's event loop, never inside the plain call that asked for it.
  */
 
 #include "dialogs/dialog_position_relative.h"
@@ -557,21 +559,30 @@ bool DIALOG_POSITION_RELATIVE::CcApply( const nlohmann::json& aAnswer, std::stri
 
 bool DIALOG_POSITION_RELATIVE::CcPick( const std::string& aKind )
 {
-    wxCommandEvent event( wxEVT_BUTTON );
-
     // The dialog's own pickers (KiCad's PCB_PICKER_TOOL); the result comes back through
     // UpdatePickedItem or UpdatePickedPoint, whose Show( true ) sends the card the new record.
+    // The picker tool runs from the frame's event loop: the plain kicadPromptPick call it is
+    // asked from cannot wait, and the tool's loop may. A dialog destroyed before then drops
+    // its pending calls, so a pick never runs on a gone dialog.
     if( aKind == "item" )
     {
-        event.SetEventObject( m_select_anchor_button );
-        OnSelectItemClick( event );
+        CallAfter( [this]()
+                   {
+                       wxCommandEvent event( wxEVT_BUTTON );
+                       event.SetEventObject( m_select_anchor_button );
+                       OnSelectItemClick( event );
+                   } );
         return true;
     }
 
     if( aKind == "point" )
     {
-        event.SetEventObject( m_select_point_button );
-        OnSelectPointClick( event );
+        CallAfter( [this]()
+                   {
+                       wxCommandEvent event( wxEVT_BUTTON );
+                       event.SetEventObject( m_select_point_button );
+                       OnSelectPointClick( event );
+                   } );
         return true;
     }
 
