@@ -19,6 +19,10 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-23: PushTool and PopTool tell the in-browser
+ * editor's host which tool the top frame holds once its tool stack changes
+ * (tool/cc_host_tool.h, WebAssembly build only).
  */
 
 #include <pgm_base.h>
@@ -28,6 +32,23 @@
 #include <tool/actions.h>
 #include <tool/tools_holder.h>
 #include <tool/tool_manager.h>
+
+#ifdef __EMSCRIPTEN__
+#include <wx/app.h>
+#include <tool/cc_host_tool.h>
+
+// The host hears the tool of the frame on top only (a frame behind it, such as the simulator's
+// pushing into the schematic editor, never speaks for the editor the reader sees).
+static void ccTellHostToolOf( const TOOLS_HOLDER* aHolder )
+{
+    wxWindow* top = wxTheApp ? wxTheApp->GetTopWindow() : nullptr;
+
+    if( !top || dynamic_cast<TOOLS_HOLDER*>( top ) != aHolder )
+        return;
+
+    CcTellHostTool( aHolder->CurrentToolName() );
+}
+#endif
 
 
 TOOLS_HOLDER::TOOLS_HOLDER() :
@@ -72,6 +93,10 @@ void TOOLS_HOLDER::PushTool( const TOOL_EVENT& aEvent )
         DisplayToolMsg( action->GetFriendlyName() );
     else
         DisplayToolMsg( actionName );
+
+#ifdef __EMSCRIPTEN__
+    ccTellHostToolOf( this );
+#endif
 }
 
 
@@ -106,11 +131,20 @@ void TOOLS_HOLDER::PopTool( const TOOL_EVENT& aEvent )
                     evt.SetHasPosition( false );
                     evt.SetReactivate( true );
                     GetToolManager()->PostEvent( evt );
+
+#ifdef __EMSCRIPTEN__
+                    // The tool under it is pushed again by that event, which tells the host;
+                    // the stack in between is no tool the reader holds.
+                    return;
+#endif
                 }
             }
             else
                 DisplayToolMsg( ACTIONS::selectionTool.GetFriendlyName() );
 
+#ifdef __EMSCRIPTEN__
+            ccTellHostToolOf( this );
+#endif
             return;
         }
     }
