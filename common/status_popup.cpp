@@ -21,6 +21,9 @@
  * or you may search the http://www.gnu.org website for the version 2 license,
  * or you may write to the Free Software Foundation, Inc.,
  * 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ *
+ * Modified by Circuit Center Inc on 2026-11-23: under __EMSCRIPTEN__ Popup shows nothing, so
+ * no KiCad status window appears over the WebAssembly editor's drawing.
  */
 
 /**
@@ -73,8 +76,13 @@ void STATUS_POPUP::onCharHook( wxKeyEvent& aEvent )
 
 void STATUS_POPUP::Popup( wxWindow* )
 {
+#ifdef __EMSCRIPTEN__
+    // The WebAssembly editor shows no KiCad window: the host says what a tool is doing in its
+    // own panel. PopupFor then only arms the hide timer of a popup never shown.
+#else
     Show( true );
     Raise();
+#endif
 }
 
 

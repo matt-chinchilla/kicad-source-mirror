@@ -27,6 +27,9 @@
  * WebAssembly editor's host (window.kicadHostFpEdit) before KiCad's dialogs, and the board
  * editor's new text, text box, barcode and reference picture ask it too
  * (window.kicadHostBoardItem).
+ * Modified by Circuit Center Inc on 2026-11-23: under __EMSCRIPTEN__ Text, Table and Barcode
+ * are not primed at the pointer when the host takes the editor's new items, so starting the
+ * tool makes no item before the reader's own click.
  */
 
 #include "drawing_tool.h"
@@ -116,6 +119,22 @@ static bool ccAskHostNewItem( bool aFootprintEditor, const char* aAsk, const EDA
         return false;
 
     return CcAskHostBoardItem( aAsk, uuid, true );
+}
+
+
+// True when the WebAssembly editor's host takes this editor's new items (engine build T17):
+// window.kicadHostFpEdit.onRequest in the footprint editor, window.kicadHostBoardItem.onRequest
+// in the board editor, a function. Only read, never called. Text, Table and Barcode are then not
+// primed at the pointer when the tool starts: a primed click would make an item the host takes
+// over before the reader has pressed anywhere. With no host the tools prime as KiCad does.
+static bool ccHostTakesNewItems( bool aFootprintEditor )
+{
+    int taken = EM_ASM_INT( {
+        var host = $0 ? window.kicadHostFpEdit : window.kicadHostBoardItem;
+        return ( host && typeof host.onRequest === 'function' ) ? 1 : 0;
+    }, aFootprintEditor ? 1 : 0 );
+
+    return taken != 0;
 }
 #endif
 
@@ -1034,7 +1053,15 @@ int DRAWING_TOOL::PlaceText( const TOOL_EVENT& aEvent )
     // Set initial cursor
     setCursor();
 
+#ifdef __EMSCRIPTEN__
+    if( ccHostTakesNewItems( m_isFootprintEditor ) )
+    {
+        // The host takes the new text: no prime, the reader's own click places it.
+    }
+    else if( aEvent.HasPosition() )
+#else
     if( aEvent.HasPosition() )
+#endif
     {
         m_toolMgr->PrimeTool( aEvent.Position() );
     }
@@ -1314,7 +1341,12 @@ int DRAWING_TOOL::DrawTable( const TOOL_EVENT& aEvent )
     // Set initial cursor
     setCursor();
 
+#ifdef __EMSCRIPTEN__
+    // The host takes the new table: no prime, the reader's own two clicks make it.
+    if( aEvent.HasPosition() && !ccHostTakesNewItems( m_isFootprintEditor ) )
+#else
     if( aEvent.HasPosition() )
+#endif
         m_toolMgr->PrimeTool( aEvent.Position() );
 
     // Main loop: keep receiving events
@@ -1566,7 +1598,12 @@ int DRAWING_TOOL::DrawBarcode( const TOOL_EVENT& aEvent )
     m_controls->ForceCursorPosition( false );
     setCursor();
 
+#ifdef __EMSCRIPTEN__
+    // The host takes the new barcode: no prime, the reader's own click places it.
+    if( aEvent.HasPosition() && !ccHostTakesNewItems( m_isFootprintEditor ) )
+#else
     if( aEvent.HasPosition() )
+#endif
         m_toolMgr->PrimeTool( aEvent.Position() );
 
     while( TOOL_EVENT* evt = Wait() )

@@ -24,6 +24,9 @@
  * Push Pad Settings, Enumerate Pads and pad table ask the WebAssembly editor's host
  * (window.kicadHostFpEdit) before KiCad's dialogs, and enumerateLoop runs Enumerate Pads'
  * interactive loop with the host's numbering in place of the dialog's.
+ * Modified by Circuit Center Inc on 2026-11-23: under __EMSCRIPTEN__ Enumerate Pads tells the
+ * host when its interactive loop ends (window.kicadHostFpEdit.onNotice, enumerateEnd, with
+ * whether the new numbers were kept).
  */
 
 
@@ -54,6 +57,27 @@
 
 #ifdef __EMSCRIPTEN__
 #include <tools/footprint_editor_host.h>
+
+
+// Tells the WebAssembly editor's host that Enumerate Pads' interactive loop ended (engine build
+// T17): window.kicadHostFpEdit.onNotice('{"notice":"enumerateEnd","kept":true|false}') when
+// that is a function. kept is true when the new numbers were committed (a double click or
+// another tool), false when they were taken back (Esc) or the loop ended without a commit. A
+// new function, so the closed onRequest reader is never handed this shape; its answer is
+// ignored, and a throwing listener never unwinds the wasm frame.
+static void ccNoticeEnumerateEnd( bool aKept )
+{
+    EM_ASM( {
+        var host = window.kicadHostFpEdit;
+
+        if( !host || typeof host.onNotice !== 'function' )
+            return;
+
+        try { host.onNotice( $0 ? '{"notice":"enumerateEnd","kept":true}'
+                                : '{"notice":"enumerateEnd","kept":false}' ); }
+        catch( e ) { console.error( '[cc fpedit] onNotice listener threw', e ); }
+    }, aKept ? 1 : 0 );
+}
 #endif
 
 
@@ -470,6 +494,11 @@ int PAD_TOOL::EnumeratePads( const TOOL_EVENT& aEvent )
     statusPopup.Move( KIPLATFORM::UI::GetMousePosition() + wxPoint( 20, 20 ) );
     canvas()->SetStatusPopup( statusPopup.GetPanel() );
 
+#ifdef __EMSCRIPTEN__
+    // True once the loop committed the new numbers (a double click or another tool).
+    bool ccKept = false;
+#endif
+
     while( TOOL_EVENT* evt = Wait() )
     {
         setCursor();
@@ -489,6 +518,9 @@ int PAD_TOOL::EnumeratePads( const TOOL_EVENT& aEvent )
         else if( evt->IsActivate() )
         {
             commit.Push( _( "Renumber Pads" ) );
+#ifdef __EMSCRIPTEN__
+            ccKept = true;
+#endif
 
             frame()->PopTool( aEvent );
             break;
@@ -592,6 +624,9 @@ int PAD_TOOL::EnumeratePads( const TOOL_EVENT& aEvent )
         else if( evt->IsDblClick( BUT_LEFT ) )
         {
             commit.Push( _( "Renumber Pads" ) );
+#ifdef __EMSCRIPTEN__
+            ccKept = true;
+#endif
             frame()->PopTool( aEvent );
             break;
         }
@@ -618,6 +653,10 @@ int PAD_TOOL::EnumeratePads( const TOOL_EVENT& aEvent )
 
     canvas()->SetStatusPopup( nullptr );
     statusPopup.Hide();
+
+#ifdef __EMSCRIPTEN__
+    ccNoticeEnumerateEnd( ccKept );
+#endif
 
     canvas()->SetCurrentCursor( KICURSOR::ARROW );
     getViewControls()->ForceCursorPosition( false );
