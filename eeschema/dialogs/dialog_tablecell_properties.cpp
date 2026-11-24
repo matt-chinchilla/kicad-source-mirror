@@ -23,6 +23,11 @@
  * Modified by Circuit Center Inc on 2026-11-18: DIALOG_TABLECELL_PROPERTIES asks the in-browser
  * editor's host to answer it (host_prompt.h, ask tableCell) before KiCad's own dialog shows
  * (WebAssembly build only).
+ *
+ * Modified by Circuit Center Inc on 2026-11-23: the host's answer is checked in
+ * kicadPromptAnswer and the cells' commit runs after the parked wait resumes, on the tool's
+ * coroutine (a commit with the table selected dispatches an event that cannot run inside the
+ * plain export; WebAssembly build only).
  */
 
 #include <gr_text.h>
@@ -969,23 +974,42 @@ int DIALOG_TABLECELL_PROPERTIES::ccAskHost()
                 dlg->m_fillColorSwatch->SetSwatchColor( *fill, false );
             }
 
-            if( !dlg->TransferDataFromWindow() )
+            // The check TransferDataFromWindow begins with, its only refusal; its commit runs in
+            // ccAskHost once the parked wait resumes (a commit here traps when the table is
+            // selected: kicadPromptAnswer is a plain export and cannot park).
+            if( !dlg->wxDialog::TransferDataFromWindow() )
                 return false;
 
-            // The dialog's own Edit Table button: KiCad then shows (asks) the table.
-            if( in.editTable )
-                dlg->m_returnValue = TABLECELL_PROPS_EDIT_TABLE;
-
+            commitPending = true;
+            editTable = in.editTable;
             return true;
         }
+
+        bool commitPending = false;
+        bool editTable = false;
 
     private:
         DIALOG_TABLECELL_PROPERTIES* m_dialog;
         const EDA_IU_SCALE&          m_scale;
     };
 
-    RECEIVER receiver( this, scale );
+    RECEIVER  receiver( this, scale );
+    const int answered = CcHostPromptModal( "tableCell", record, receiver );
 
-    return CcHostPromptModal( "tableCell", record, receiver );
+    // The commit, on the tool's coroutine where KiCad's ShowModal would have made it. It sets
+    // TABLECELL_PROPS_OK at its end, so the dialog's own Edit Table button is applied after it:
+    // KiCad then shows (asks) the table.
+    if( answered == 1 && receiver.commitPending )
+    {
+        if( !TransferDataFromWindow() )
+            return 0;
+
+        if( receiver.editTable )
+            m_returnValue = TABLECELL_PROPS_EDIT_TABLE;
+
+        return 1;
+    }
+
+    return answered;
 }
 #endif // __EMSCRIPTEN__

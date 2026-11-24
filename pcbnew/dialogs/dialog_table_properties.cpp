@@ -23,6 +23,11 @@
  * Modified by Circuit Center Inc on 2026-11-18: DIALOG_TABLE_PROPERTIES asks the in-browser
  * editor's host to answer it (host_prompt.h, ask table) before KiCad's own dialog shows
  * (WebAssembly build only).
+ *
+ * Modified by Circuit Center Inc on 2026-11-23: the host's answer is checked in
+ * kicadPromptAnswer and the table's commit runs after the parked wait resumes, on the tool's
+ * coroutine (a commit with the table selected dispatches an event that cannot run inside the
+ * plain export; WebAssembly build only).
  */
 
 #include "dialog_table_properties.h"
@@ -933,16 +938,30 @@ int DIALOG_TABLE_PROPERTIES::ccAskHost()
             if( separators.style >= 0 )
                 dlg->m_separatorsStyleCombo->SetSelection( separators.style );
 
-            return dlg->TransferDataFromWindow();
+            // The checks TransferDataFromWindow begins with, its only refusals; its commit runs
+            // in ccAskHost once the parked wait resumes (a commit here traps when the table is
+            // selected: kicadPromptAnswer is a plain export and cannot park).
+            if( !dlg->m_grid->CommitPendingChanges() || !dlg->wxDialog::TransferDataFromWindow() )
+                return false;
+
+            commitPending = true;
+            return true;
         }
+
+        bool commitPending = false;
 
     private:
         DIALOG_TABLE_PROPERTIES* m_dialog;
         const EDA_IU_SCALE&      m_scale;
     };
 
-    RECEIVER receiver( this, scale );
+    RECEIVER  receiver( this, scale );
+    const int answered = CcHostPromptModal( "table", record, receiver );
 
-    return CcHostPromptModal( "table", record, receiver );
+    // The commit, on the tool's coroutine where KiCad's ShowModal would have made it.
+    if( answered == 1 && receiver.commitPending )
+        return TransferDataFromWindow() ? 1 : 0;
+
+    return answered;
 }
 #endif // __EMSCRIPTEN__
